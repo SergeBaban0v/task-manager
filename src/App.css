@@ -20,7 +20,8 @@
 
 .task-header {
   flex: 0 0 auto;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(220px, 420px) auto;
   align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
@@ -41,6 +42,27 @@
   font-size: 36px;
   line-height: 1.1;
   font-weight: 750;
+}
+
+.task-search {
+  width: 100%;
+  align-self: center;
+}
+
+.task-search input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--bg);
+  font: inherit;
+}
+
+.task-search input:focus {
+  border-color: var(--accent);
+  outline: 3px solid var(--focus);
 }
 
 .task-stats {
@@ -602,6 +624,17 @@
   background: var(--surface);
 }
 
+.detail-dialog input:read-only,
+.detail-dialog textarea:read-only,
+.detail-dialog select:disabled {
+  color: var(--muted);
+  background: #f7f8fa;
+}
+
+.detail-dialog.readonly .relationship-list li {
+  grid-template-columns: 120px minmax(0, 1fr);
+}
+
 .relationship-list span {
   min-width: 0;
   overflow: hidden;
@@ -744,6 +777,7 @@
 
   .task-header {
     display: grid;
+    grid-template-columns: 1fr;
     gap: 14px;
   }
 

@@ -374,6 +374,10 @@ function fromDatetimeLocalValue(value) {
   return new Date(value).getTime()
 }
 
+function normalizeSearchText(value) {
+  return String(value || '').trim().toLocaleLowerCase('ru-RU')
+}
+
 function App() {
   const [tasks, setTasks] = useState(readStoredTasks)
   const [taskText, setTaskText] = useState('')
@@ -384,6 +388,7 @@ function App() {
   const [priorityMenuTaskId, setPriorityMenuTaskId] = useState(null)
   const [priorityMenuPosition, setPriorityMenuPosition] = useState(null)
   const [showClosedTasks, setShowClosedTasks] = useState(true)
+  const [searchQuery, setSearchQuery] = useState('')
   const [frozenTaskOrder, setFrozenTaskOrder] = useState(null)
   const holdRepeatRef = useRef(null)
   const taskItemRefs = useRef(new Map())
@@ -577,8 +582,34 @@ function App() {
     const dependencyHoldTasks = []
     const timerHoldTasks = []
     const closedTasks = []
+    const normalizedSearchQuery = normalizeSearchText(searchQuery)
+
+    function taskMatchesSearch(task) {
+      if (!normalizedSearchQuery) {
+        return true
+      }
+
+      const relatedTaskTitles = [
+        ...getTaskDependencies(task)
+          .map((taskId) => taskById.get(taskId)?.title)
+          .filter(Boolean),
+        ...tasks
+          .filter((relatedTask) =>
+            getTaskDependencies(relatedTask).includes(task.id),
+          )
+          .map((relatedTask) => relatedTask.title),
+      ]
+
+      return normalizeSearchText(
+        [task.title, task.description, ...relatedTaskTitles].join(' '),
+      ).includes(normalizedSearchQuery)
+    }
 
     for (const task of tasks) {
+      if (!taskMatchesSearch(task)) {
+        continue
+      }
+
       if (isTaskClosed(task)) {
         closedTasks.push(task)
       } else if (isTaskBlockedByDependency(task, taskById)) {
@@ -626,7 +657,7 @@ function App() {
     const newTasks = sortedTasks.filter((task) => !frozenTaskOrder.includes(task.id))
 
     return [...frozenTasks, ...newTasks]
-  }, [tasks, now, showClosedTasks, taskById, frozenTaskOrder])
+  }, [tasks, now, showClosedTasks, taskById, frozenTaskOrder, searchQuery])
 
   const completedCount = useMemo(
     () => tasks.filter((task) => task.completed).length,
@@ -978,8 +1009,7 @@ function App() {
 
   function openDetailEditor(event, task) {
     if (
-      task.completed ||
-      event.target.closest('button, input, .priority-menu, .closed-date')
+      event.target.closest('button, input, .priority-menu')
     ) {
       return
     }
@@ -990,6 +1020,7 @@ function App() {
       title: task.title,
       priority: getTaskPriority(task).id,
       description: task.description || '',
+      readonly: task.completed,
       relationships: [
         ...getTaskDependencies(task).map((taskId) => ({
           type: 'depends-on',
@@ -1060,6 +1091,19 @@ function App() {
           <div>
             <p className="eyebrow">Task Manager</p>
             <h1 id="task-manager-title">Мои задачи</h1>
+          </div>
+          <div className="task-search">
+            <label className="sr-only" htmlFor="task-search-input">
+              Поиск задач
+            </label>
+            <input
+              id="task-search-input"
+              type="search"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Поиск по задачам"
+              autoComplete="off"
+            />
           </div>
           <div className="task-stats" aria-label="Статистика задач">
             <button
@@ -1225,7 +1269,9 @@ function App() {
           </ul>
         ) : (
           <p className="empty-state">
-            Список пуст. Добавьте первую задачу.
+            {searchQuery.trim()
+              ? 'Ничего не найдено.'
+              : 'Список пуст. Добавьте первую задачу.'}
           </p>
         )}
       </section>
@@ -1325,7 +1371,10 @@ function App() {
           role="presentation"
           onMouseDown={handleDetailBackdropMouseDown}
         >
-          <form className="detail-dialog" onSubmit={handleDetailSubmit}>
+          <form
+            className={`detail-dialog${detailEditor.readonly ? ' readonly' : ''}`}
+            onSubmit={handleDetailSubmit}
+          >
             <button
               className="dialog-close-button"
               type="button"
@@ -1344,6 +1393,7 @@ function App() {
               onChange={(event) =>
                 updateDetailTaskField('title', event.target.value)
               }
+              readOnly={detailEditor.readonly}
               autoFocus
             />
 
@@ -1354,6 +1404,7 @@ function App() {
               onChange={(event) =>
                 updateDetailTaskField('priority', event.target.value)
               }
+              disabled={detailEditor.readonly}
             >
               {PRIORITIES.map((priority) => (
                 <option key={priority.id} value={priority.id}>
@@ -1369,6 +1420,7 @@ function App() {
               onChange={(event) =>
                 updateDetailTaskField('description', event.target.value)
               }
+              readOnly={detailEditor.readonly}
               rows={5}
             />
 
@@ -1376,51 +1428,53 @@ function App() {
               <h3>Связи</h3>
 
               <div className="relationship-block">
-                <div className="relationship-add">
-                  <select
-                    aria-label="Тип связи"
-                    value={detailEditor.selectedRelationType}
-                    onChange={(event) =>
-                      setDetailEditor((current) => ({
-                        ...current,
-                        selectedRelationType: event.target.value,
-                      }))
-                    }
-                  >
-                    {RELATION_TYPES.map((relationType) => (
-                      <option key={relationType.id} value={relationType.id}>
-                        {relationType.label}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    aria-label="Задача связи"
-                    value={detailEditor.selectedLinkedTaskId}
-                    onChange={(event) =>
-                      setDetailEditor((current) => ({
-                        ...current,
-                        selectedLinkedTaskId: event.target.value,
-                      }))
-                    }
-                  >
-                    <option value="">Выберите задачу</option>
-                    {detailLinkedTaskOptions.map((task) => (
-                      <option key={task.id} value={task.id}>
-                        {task.title}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    className="relationship-icon-button"
-                    type="button"
-                    onClick={addDetailRelation}
-                    disabled={!detailEditor.selectedLinkedTaskId}
-                    aria-label="Добавить связь"
-                    title="Добавить связь"
-                  >
-                    <span aria-hidden="true">+</span>
-                  </button>
-                </div>
+                {!detailEditor.readonly ? (
+                  <div className="relationship-add">
+                    <select
+                      aria-label="Тип связи"
+                      value={detailEditor.selectedRelationType}
+                      onChange={(event) =>
+                        setDetailEditor((current) => ({
+                          ...current,
+                          selectedRelationType: event.target.value,
+                        }))
+                      }
+                    >
+                      {RELATION_TYPES.map((relationType) => (
+                        <option key={relationType.id} value={relationType.id}>
+                          {relationType.label}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      aria-label="Задача связи"
+                      value={detailEditor.selectedLinkedTaskId}
+                      onChange={(event) =>
+                        setDetailEditor((current) => ({
+                          ...current,
+                          selectedLinkedTaskId: event.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">Выберите задачу</option>
+                      {detailLinkedTaskOptions.map((task) => (
+                        <option key={task.id} value={task.id}>
+                          {task.title}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="relationship-icon-button"
+                      type="button"
+                      onClick={addDetailRelation}
+                      disabled={!detailEditor.selectedLinkedTaskId}
+                      aria-label="Добавить связь"
+                      title="Добавить связь"
+                    >
+                      <span aria-hidden="true">+</span>
+                    </button>
+                  </div>
+                ) : null}
 
                 {detailRelationships.length > 0 ? (
                   <ul className="relationship-list">
@@ -1430,20 +1484,22 @@ function App() {
                           {relation.relationType.label}
                         </span>
                         <span>{relation.task.title}</span>
-                        <button
-                          className="relationship-icon-button"
-                          type="button"
-                          onClick={() =>
-                            removeDetailRelation(
-                              relation.taskId,
-                              relation.type,
-                            )
-                          }
-                          aria-label={`Удалить связь: ${relation.relationType.label} ${relation.task.title}`}
-                          title="Удалить связь"
-                        >
-                          <span aria-hidden="true">-</span>
-                        </button>
+                        {!detailEditor.readonly ? (
+                          <button
+                            className="relationship-icon-button"
+                            type="button"
+                            onClick={() =>
+                              removeDetailRelation(
+                                relation.taskId,
+                                relation.type,
+                              )
+                            }
+                            aria-label={`Удалить связь: ${relation.relationType.label} ${relation.task.title}`}
+                            title="Удалить связь"
+                          >
+                            <span aria-hidden="true">-</span>
+                          </button>
+                        ) : null}
                       </li>
                     ))}
                   </ul>
