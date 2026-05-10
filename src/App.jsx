@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import './App.css'
 
 const STORAGE_KEY = 'task-manager.tasks'
@@ -10,6 +11,9 @@ const HOLD_REPEAT_START_MS = 260
 const HOLD_REPEAT_MIN_MS = 70
 const HOLD_REPEAT_ACCELERATION = 0.78
 const DEFAULT_PRIORITY = 'medium'
+const PRIORITY_MENU_WIDTH = 184
+const PRIORITY_MENU_HEIGHT = 202
+const PRIORITY_MENU_GAP = 6
 
 const PRIORITIES = [
   { id: 'critical', label: 'Критический', icon: 'skull', rank: 0 },
@@ -288,6 +292,7 @@ function App() {
   const [detailEditor, setDetailEditor] = useState(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState(null)
   const [priorityMenuTaskId, setPriorityMenuTaskId] = useState(null)
+  const [priorityMenuPosition, setPriorityMenuPosition] = useState(null)
   const [showClosedTasks, setShowClosedTasks] = useState(true)
   const [frozenTaskOrder, setFrozenTaskOrder] = useState(null)
   const holdRepeatRef = useRef(null)
@@ -307,6 +312,42 @@ function App() {
     window.clearTimeout(holdRepeatRef.current.timeoutId)
     holdRepeatRef.current = null
     setFrozenTaskOrder(null)
+  }
+
+  function closePriorityMenu() {
+    setPriorityMenuTaskId(null)
+    setPriorityMenuPosition(null)
+  }
+
+  function getPriorityMenuPosition(buttonElement) {
+    const rect = buttonElement.getBoundingClientRect()
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+    const availableBelow = viewportHeight - rect.bottom
+    const openUp = availableBelow < PRIORITY_MENU_HEIGHT + PRIORITY_MENU_GAP
+
+    return {
+      left: Math.min(
+        Math.max(PRIORITY_MENU_GAP, rect.left),
+        viewportWidth - PRIORITY_MENU_WIDTH - PRIORITY_MENU_GAP,
+      ),
+      top: openUp
+        ? Math.max(PRIORITY_MENU_GAP, rect.top - PRIORITY_MENU_HEIGHT - PRIORITY_MENU_GAP)
+        : Math.min(
+            rect.bottom + PRIORITY_MENU_GAP,
+            viewportHeight - PRIORITY_MENU_HEIGHT - PRIORITY_MENU_GAP,
+          ),
+    }
+  }
+
+  function togglePriorityMenu(taskId, buttonElement) {
+    if (priorityMenuTaskId === taskId) {
+      closePriorityMenu()
+      return
+    }
+
+    setPriorityMenuTaskId(taskId)
+    setPriorityMenuPosition(getPriorityMenuPosition(buttonElement))
   }
 
   function startHoldRepeat(action, taskOrder) {
@@ -385,6 +426,20 @@ function App() {
       clearHoldRepeat()
     }
   }, [])
+
+  useEffect(() => {
+    if (!priorityMenuTaskId) {
+      return undefined
+    }
+
+    window.addEventListener('resize', closePriorityMenu)
+    document.addEventListener('scroll', closePriorityMenu, true)
+
+    return () => {
+      window.removeEventListener('resize', closePriorityMenu)
+      document.removeEventListener('scroll', closePriorityMenu, true)
+    }
+  }, [priorityMenuTaskId])
 
   useEffect(() => {
     if (!detailEditor && !deleteConfirmation) {
@@ -602,7 +657,7 @@ function App() {
         task.id === taskId && !task.completed ? { ...task, priority } : task,
       ),
     )
-    setPriorityMenuTaskId(null)
+    closePriorityMenu()
   }
 
   function applyDetailRelationships(nextRelationships) {
@@ -822,7 +877,7 @@ function App() {
       return
     }
 
-    setPriorityMenuTaskId(null)
+    closePriorityMenu()
     setDetailEditor({
       taskId: task.id,
       title: task.title,
@@ -884,6 +939,13 @@ function App() {
         .filter((relation) => relation.task)
     : []
 
+  const priorityMenuTask = priorityMenuTaskId
+    ? taskById.get(priorityMenuTaskId)
+    : null
+  const priorityMenuTaskPriority = priorityMenuTask
+    ? getTaskPriority(priorityMenuTask)
+    : null
+
   return (
     <main className="app">
       <section className="task-panel" aria-labelledby="task-manager-title">
@@ -934,7 +996,6 @@ function App() {
               const onHold = isTaskOnHold(task, now, taskById)
               const closed = isTaskClosed(task)
               const closedAt = task.completedAt || task.createdAt
-              const ownPriority = getTaskPriority(task)
               const displayedPriority = getDisplayedTaskPriority(task, tasks)
               const itemClassName = [
                 'task-item',
@@ -942,6 +1003,7 @@ function App() {
                 `priority-${displayedPriority.id}`,
                 dependencyHold ? 'dependency-hold' : '',
                 onHold ? 'on-hold' : '',
+                priorityMenuTaskId === task.id ? 'priority-menu-open' : '',
               ]
                 .filter(Boolean)
                 .join(' ')
@@ -973,9 +1035,7 @@ function App() {
                           return
                         }
 
-                        setPriorityMenuTaskId((currentTaskId) =>
-                          currentTaskId === task.id ? null : task.id,
-                        )
+                        togglePriorityMenu(task.id, event.currentTarget)
                       }}
                       aria-label={`Изменить приоритет задачи: ${displayedPriority.label}`}
                       aria-expanded={priorityMenuTaskId === task.id}
@@ -983,33 +1043,6 @@ function App() {
                     >
                       <PriorityIcon icon={displayedPriority.icon} />
                     </button>
-                    {!closed && priorityMenuTaskId === task.id ? (
-                      <div className="priority-menu" role="menu">
-                        {PRIORITIES.map((priorityOption) => (
-                          <button
-                            className={
-                              priorityOption.id === ownPriority.id
-                                ? 'selected'
-                                : ''
-                            }
-                            key={priorityOption.id}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={priorityOption.id === ownPriority.id}
-                            onClick={() =>
-                              updateTaskPriority(task.id, priorityOption.id)
-                            }
-                          >
-                            <span
-                              className={`priority-swatch priority-${priorityOption.id}`}
-                            >
-                              <PriorityIcon icon={priorityOption.icon} />
-                            </span>
-                            <span>{priorityOption.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
                   </div>
                   <div className="task-check">
                     <input
@@ -1089,6 +1122,44 @@ function App() {
           </p>
         )}
       </section>
+
+      {priorityMenuTask && priorityMenuPosition && typeof document !== 'undefined'
+        ? createPortal(
+            <div
+              className="priority-menu"
+              role="menu"
+              style={{
+                left: `${priorityMenuPosition.left}px`,
+                top: `${priorityMenuPosition.top}px`,
+              }}
+            >
+              {PRIORITIES.map((priorityOption) => (
+                <button
+                  className={
+                    priorityOption.id === priorityMenuTaskPriority.id
+                      ? 'selected'
+                      : ''
+                  }
+                  key={priorityOption.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={priorityOption.id === priorityMenuTaskPriority.id}
+                  onClick={() =>
+                    updateTaskPriority(priorityMenuTask.id, priorityOption.id)
+                  }
+                >
+                  <span
+                    className={`priority-swatch priority-${priorityOption.id}`}
+                  >
+                    <PriorityIcon icon={priorityOption.icon} />
+                  </span>
+                  <span>{priorityOption.label}</span>
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
 
       {holdEditor ? (
         <div className="modal-backdrop" role="presentation">
