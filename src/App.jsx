@@ -14,6 +14,10 @@ const DEFAULT_PRIORITY = 'medium'
 const PRIORITY_MENU_WIDTH = 184
 const PRIORITY_MENU_HEIGHT = 202
 const PRIORITY_MENU_GAP = 6
+const WINDOW_SIZE_INITIALIZED_KEY = 'task-manager.window.initialized'
+const INITIAL_WINDOW_MIN_WIDTH = 760
+const INITIAL_WINDOW_MAX_WIDTH = 980
+const INITIAL_WINDOW_HEIGHT = 720
 
 const PRIORITIES = [
   { id: 'critical', label: 'Критический', icon: 'skull', rank: 0 },
@@ -22,6 +26,92 @@ const PRIORITIES = [
   { id: 'medium', label: 'Средний', icon: 'equals', rank: 3 },
   { id: 'low', label: 'Низкий', icon: 'down', rank: 4 },
 ]
+
+function getInitialDemoTasks(currentTime = Date.now()) {
+  return [
+    {
+      id: 'demo-production-release',
+      title: 'Выпустить срочное обновление',
+      description:
+        'Критическая задача. Она зависит от блокера ниже, поэтому блокер визуально поднимает приоритет всей цепочки.',
+      dependencies: ['demo-fix-auth-bug'],
+      priority: 'critical',
+      completed: false,
+      completedAt: null,
+      createdAt: currentTime - 7 * 60000,
+      holdUntil: null,
+    },
+    {
+      id: 'demo-fix-auth-bug',
+      title: 'Починить ошибку авторизации',
+      description:
+        'Эта задача блокирует критический релиз. Ее собственный приоритет средний, но в списке она отображается как критическая.',
+      dependencies: ['demo-check-logs'],
+      priority: 'medium',
+      completed: false,
+      completedAt: null,
+      createdAt: currentTime - 12 * 60000,
+      holdUntil: null,
+    },
+    {
+      id: 'demo-check-logs',
+      title: 'Проверить серверные логи',
+      description:
+        'Нижний блокер цепочки. Через зависимости получает максимальный приоритет заблокированной срочной задачи.',
+      dependencies: [],
+      priority: 'low',
+      completed: false,
+      completedAt: null,
+      createdAt: currentTime - 18 * 60000,
+      holdUntil: null,
+    },
+    {
+      id: 'demo-call-supplier',
+      title: 'Позвонить поставщику',
+      description: 'Обычная активная задача с высоким приоритетом.',
+      dependencies: [],
+      priority: 'high',
+      completed: false,
+      completedAt: null,
+      createdAt: currentTime - 3 * 60000,
+      holdUntil: null,
+    },
+    {
+      id: 'demo-wait-reply',
+      title: 'Дождаться ответа по договору',
+      description:
+        'Пример ручного hold. Таймер показывает, когда задача вернется в активные.',
+      dependencies: [],
+      priority: 'very-high',
+      completed: false,
+      completedAt: null,
+      createdAt: currentTime - 45 * 60000,
+      holdUntil: currentTime + 90 * 60000,
+    },
+    {
+      id: 'demo-write-notes',
+      title: 'Разобрать заметки встречи',
+      description: 'Низкоприоритетная задача без блокировок.',
+      dependencies: [],
+      priority: 'low',
+      completed: false,
+      completedAt: null,
+      createdAt: currentTime - 25 * 60000,
+      holdUntil: null,
+    },
+    {
+      id: 'demo-read-brief',
+      title: 'Прочитать вводную по проекту',
+      description: 'Закрытая задача. Ее можно снова открыть через чекбокс.',
+      dependencies: [],
+      priority: 'medium',
+      completed: true,
+      completedAt: currentTime - 20 * 60000,
+      createdAt: currentTime - 2 * 60 * 60000,
+      holdUntil: null,
+    },
+  ]
+}
 
 const RELATION_TYPES = [
   { id: 'depends-on', label: 'зависит от' },
@@ -202,7 +292,7 @@ function readStoredTasks() {
     const savedTasks = localStorage.getItem(STORAGE_KEY)
 
     if (!savedTasks) {
-      return []
+      return normalizeTasks(getInitialDemoTasks())
     }
 
     const parsedTasks = JSON.parse(savedTasks)
@@ -387,11 +477,28 @@ function App() {
       return
     }
 
-    const targetWidth = Math.min(980, window.screen.availWidth)
-    const targetHeight = Math.min(360, window.screen.availHeight)
+    try {
+      if (localStorage.getItem(WINDOW_SIZE_INITIALIZED_KEY)) {
+        return
+      }
 
-    if (window.outerWidth > targetWidth || window.outerHeight > targetHeight) {
-      window.resizeTo(targetWidth, targetHeight)
+      const targetWidth = Math.min(
+        INITIAL_WINDOW_MAX_WIDTH,
+        Math.max(INITIAL_WINDOW_MIN_WIDTH, window.outerWidth),
+        window.screen.availWidth,
+      )
+      const targetHeight = Math.min(
+        INITIAL_WINDOW_HEIGHT,
+        window.screen.availHeight,
+      )
+
+      if (window.outerWidth < targetWidth || window.outerHeight < targetHeight) {
+        window.resizeTo(targetWidth, targetHeight)
+      }
+
+      localStorage.setItem(WINDOW_SIZE_INITIALIZED_KEY, 'true')
+    } catch {
+      // Some browsers disallow programmatic resizing for PWA windows.
     }
   }, [])
 
