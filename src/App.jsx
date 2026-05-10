@@ -1,8 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { createClient } from '@supabase/supabase-js'
 import './App.css'
 
 const STORAGE_KEY = 'task-manager.tasks'
+const STORAGE_MODE_KEY = 'task-manager.storage-mode'
 const STORAGE_VERSION = 2
 const HOLD_STEP_MINUTES = 15
 const HOLD_STEP_MS = HOLD_STEP_MINUTES * 60000
@@ -18,6 +20,12 @@ const WINDOW_SIZE_INITIALIZED_KEY = 'task-manager.window.initialized'
 const INITIAL_WINDOW_MIN_WIDTH = 760
 const INITIAL_WINDOW_MAX_WIDTH = 980
 const INITIAL_WINDOW_HEIGHT = 720
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
+const supabase =
+  SUPABASE_URL && SUPABASE_ANON_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    : null
 
 const PRIORITIES = [
   { id: 'critical', label: 'Критический', icon: 'skull', rank: 0 },
@@ -318,6 +326,98 @@ function writeStoredTasks(tasks) {
   )
 }
 
+function readStorageMode() {
+  try {
+    return localStorage.getItem(STORAGE_MODE_KEY) === 'online'
+      ? 'online'
+      : 'local'
+  } catch {
+    return 'local'
+  }
+}
+
+function writeStorageMode(storageMode) {
+  localStorage.setItem(STORAGE_MODE_KEY, storageMode)
+}
+
+function taskToSupabaseRow(task, userId) {
+  return {
+    id: task.id,
+    user_id: userId,
+    title: task.title,
+    description: task.description,
+    dependencies: getTaskDependencies(task),
+    priority: getTaskPriority(task).id,
+    completed: task.completed,
+    completed_at: task.completedAt,
+    created_at: task.createdAt,
+    hold_until: task.holdUntil,
+    updated_at: Date.now(),
+  }
+}
+
+function supabaseRowToTask(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    dependencies: row.dependencies,
+    priority: row.priority,
+    completed: row.completed,
+    completedAt: row.completed_at,
+    createdAt: row.created_at,
+    holdUntil: row.hold_until,
+  }
+}
+
+async function loadSupabaseTasks(userId) {
+  const { data, error } = await supabase
+    .from('tasks')
+    .select(
+      'id,title,description,dependencies,priority,completed,completed_at,created_at,hold_until',
+    )
+    .eq('user_id', userId)
+
+  if (error) {
+    throw error
+  }
+
+  return normalizeTasks((data || []).map(supabaseRowToTask))
+}
+
+async function saveSupabaseTasks(tasks, userId, previousTaskIds) {
+  const nextTaskIds = new Set(tasks.map((task) => task.id))
+  const removedTaskIds = [...previousTaskIds].filter(
+    (taskId) => !nextTaskIds.has(taskId),
+  )
+
+  if (removedTaskIds.length > 0) {
+    const { error } = await supabase
+      .from('tasks')
+      .delete()
+      .eq('user_id', userId)
+      .in('id', removedTaskIds)
+
+    if (error) {
+      throw error
+    }
+  }
+
+  if (tasks.length > 0) {
+    const { error } = await supabase
+      .from('tasks')
+      .upsert(tasks.map((task) => taskToSupabaseRow(task, userId)), {
+        onConflict: 'user_id,id',
+      })
+
+    if (error) {
+      throw error
+    }
+  }
+
+  return nextTaskIds
+}
+
 function isTaskClosed(task) {
   return Boolean(task.completed)
 }
@@ -380,6 +480,11 @@ function normalizeSearchText(value) {
 
 function App() {
   const [tasks, setTasks] = useState(readStoredTasks)
+  const [storageMode, setStorageMode] = useState(readStorageMode)
+  const [session, setSession] = useState(null)
+  const [authEmail, setAuthEmail] = useState('')
+  const [syncStatus, setSyncStatus] = useState('idle')
+  const [syncMessage, setSyncMessage] = useState('')
   const [taskText, setTaskText] = useState('')
   const [now, setNow] = useState(() => Date.now())
   const [holdEditor, setHoldEditor] = useState(null)
@@ -391,6 +496,8 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [frozenTaskOrder, setFrozenTaskOrder] = useState(null)
   const holdRepeatRef = useRef(null)
+  const onlineLoadedRef = useRef(false)
+  const onlineTaskIdsRef = useRef(new Set())
   const taskItemRefs = useRef(new Map())
   const taskItemRects = useRef(new Map())
 
@@ -574,8 +681,144 @@ function App() {
   }, [detailEditor, deleteConfirmation])
 
   useEffect(() => {
-    writeStoredTasks(tasks)
-  }, [tasks])
+    if (!supabase) {
+      return undefined
+    }
+
+    let mounted = true
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (mounted) {
+        setSession(data.session)
+      }
+    })
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession)
+      onlineLoadedRef.current = false
+      onlineTaskIdsRef.current = new Set()
+    })
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    writeStorageMode(storageMode)
+
+    if (storageMode === 'local') {
+      onlineLoadedRef.current = false
+      onlineTaskIdsRef.current = new Set()
+    }
+  }, [storageMode])
+
+  useEffect(() => {
+    if (storageMode !== 'online') {
+      return
+    }
+
+    if (!supabase) {
+      queueMicrotask(() => {
+        setSyncStatus('error')
+        setSyncMessage('Supabase не настроен')
+      })
+      return
+    }
+
+    if (!session) {
+      onlineLoadedRef.current = false
+      onlineTaskIdsRef.current = new Set()
+      queueMicrotask(() => {
+        setSyncStatus('signed-out')
+        setSyncMessage('Войдите, чтобы загрузить онлайн-задачи')
+      })
+      return
+    }
+
+    let cancelled = false
+
+    async function loadOnlineTasks() {
+      try {
+        setSyncStatus('loading')
+        setSyncMessage('Загрузка онлайн-задач')
+
+        const onlineTasks = await loadSupabaseTasks(session.user.id)
+
+        if (cancelled) {
+          return
+        }
+
+        onlineTaskIdsRef.current = new Set(onlineTasks.map((task) => task.id))
+        onlineLoadedRef.current = true
+        setTasks(onlineTasks)
+        setSyncStatus('synced')
+        setSyncMessage('Онлайн-задачи загружены')
+      } catch (error) {
+        if (!cancelled) {
+          setSyncStatus('error')
+          setSyncMessage(error.message || 'Не удалось загрузить онлайн-задачи')
+        }
+      }
+    }
+
+    loadOnlineTasks()
+
+    return () => {
+      cancelled = true
+    }
+  }, [storageMode, session])
+
+  useEffect(() => {
+    if (storageMode === 'local') {
+      writeStoredTasks(tasks)
+      return
+    }
+
+    if (
+      storageMode !== 'online' ||
+      !supabase ||
+      !session ||
+      !onlineLoadedRef.current
+    ) {
+      return
+    }
+
+    let cancelled = false
+
+    async function persistOnlineTasks() {
+      try {
+        setSyncStatus('saving')
+        setSyncMessage('Сохранение онлайн')
+
+        const nextTaskIds = await saveSupabaseTasks(
+          tasks,
+          session.user.id,
+          onlineTaskIdsRef.current,
+        )
+
+        if (!cancelled) {
+          onlineTaskIdsRef.current = nextTaskIds
+          setSyncStatus('synced')
+          setSyncMessage('Онлайн-сохранение выполнено')
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setSyncStatus('error')
+          setSyncMessage(error.message || 'Не удалось сохранить онлайн-задачи')
+        }
+      }
+    }
+
+    persistOnlineTasks()
+
+    return () => {
+      cancelled = true
+    }
+  }, [tasks, storageMode, session])
 
   const visibleTasks = useMemo(() => {
     const activeTasks = []
@@ -667,6 +910,96 @@ function App() {
     () => tasks.filter((task) => !task.completed).length,
     [tasks],
   )
+
+  function switchStorageMode(nextStorageMode) {
+    if (nextStorageMode === storageMode) {
+      return
+    }
+
+    closePriorityMenu()
+    setDetailEditor(null)
+    setDeleteConfirmation(null)
+    onlineLoadedRef.current = false
+    onlineTaskIdsRef.current = new Set()
+
+    if (nextStorageMode === 'local') {
+      setTasks(readStoredTasks())
+      setSyncStatus('idle')
+      setSyncMessage('')
+    }
+
+    setStorageMode(nextStorageMode)
+  }
+
+  async function signInOnline(event) {
+    event.preventDefault()
+
+    if (!supabase || !authEmail.trim()) {
+      return
+    }
+
+    try {
+      setSyncStatus('loading')
+      setSyncMessage('Отправляем ссылку для входа')
+
+      const { error } = await supabase.auth.signInWithOtp({
+        email: authEmail.trim(),
+        options: {
+          emailRedirectTo: window.location.href,
+        },
+      })
+
+      if (error) {
+        throw error
+      }
+
+      setSyncStatus('signed-out')
+      setSyncMessage('Проверьте почту и откройте ссылку для входа')
+    } catch (error) {
+      setSyncStatus('error')
+      setSyncMessage(error.message || 'Не удалось отправить ссылку для входа')
+    }
+  }
+
+  async function signOutOnline() {
+    if (!supabase) {
+      return
+    }
+
+    await supabase.auth.signOut()
+    setSession(null)
+    onlineLoadedRef.current = false
+    onlineTaskIdsRef.current = new Set()
+    setTasks(readStoredTasks())
+    setStorageMode('local')
+  }
+
+  async function migrateLocalTasksOnline() {
+    if (!supabase || !session) {
+      return
+    }
+
+    try {
+      setSyncStatus('saving')
+      setSyncMessage('Переносим локальные задачи в онлайн')
+
+      const localTasks = readStoredTasks()
+      const nextTaskIds = await saveSupabaseTasks(
+        localTasks,
+        session.user.id,
+        onlineTaskIdsRef.current,
+      )
+
+      onlineTaskIdsRef.current = nextTaskIds
+      onlineLoadedRef.current = true
+      setTasks(localTasks)
+      setSyncStatus('synced')
+      setSyncMessage('Локальные задачи перенесены в онлайн')
+    } catch (error) {
+      setSyncStatus('error')
+      setSyncMessage(error.message || 'Не удалось перенести задачи')
+    }
+  }
 
   useLayoutEffect(() => {
     const nextRects = new Map()
@@ -1123,6 +1456,66 @@ function App() {
             <span>{activeCount} активных</span>
           </div>
         </header>
+
+        <section className="storage-panel" aria-label="Режим хранения задач">
+          <div className="storage-toggle" role="group" aria-label="Режим хранения">
+            <button
+              type="button"
+              data-state={storageMode === 'local' ? 'active' : 'idle'}
+              onClick={() => switchStorageMode('local')}
+            >
+              Локально
+            </button>
+            <button
+              type="button"
+              data-state={storageMode === 'online' ? 'active' : 'idle'}
+              onClick={() => switchStorageMode('online')}
+            >
+              Онлайн
+            </button>
+          </div>
+
+          <span className={`storage-status ${syncStatus}`}>
+            {storageMode === 'local'
+              ? 'Данные хранятся в этом браузере'
+              : syncMessage || 'Онлайн-режим'}
+          </span>
+
+          {storageMode === 'online' && !supabase ? (
+            <span className="storage-warning">Supabase env не настроены</span>
+          ) : null}
+
+          {storageMode === 'online' && supabase && !session ? (
+            <form className="auth-form" onSubmit={signInOnline}>
+              <label className="sr-only" htmlFor="auth-email">
+                Email для входа
+              </label>
+              <input
+                id="auth-email"
+                type="email"
+                value={authEmail}
+                onChange={(event) => setAuthEmail(event.target.value)}
+                placeholder="email для входа"
+                autoComplete="email"
+              />
+              <button type="submit" disabled={!authEmail.trim()}>
+                Войти
+              </button>
+            </form>
+          ) : null}
+
+          {storageMode === 'online' && session ? (
+            <div className="online-actions">
+              <span>{session.user.email}</span>
+              <button type="button" onClick={migrateLocalTasksOnline}>
+                Перенести локальные
+              </button>
+              <button type="button" onClick={signOutOnline}>
+                Выйти
+              </button>
+            </div>
+          ) : null}
+        </section>
 
         <form className="task-form" onSubmit={addTask}>
           <label className="sr-only" htmlFor="task-input">
