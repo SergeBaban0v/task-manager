@@ -595,7 +595,7 @@ async function loadSupabaseTasks(userId) {
   return normalizeTasks((data || []).map(supabaseRowToTask))
 }
 
-async function saveSupabaseTasks(tasks, userId, previousSnapshot) {
+async function saveSupabaseTasks(tasks, userId, previousSnapshot, knownTaskIds) {
   const { changedTasks, removedTaskIds, nextSnapshot } = getSupabaseTaskChanges(
     tasks,
     previousSnapshot,
@@ -621,9 +621,9 @@ async function saveSupabaseTasks(tasks, userId, previousSnapshot) {
     }
   }
 
-  const newTasks = changedTasks.filter((task) => !previousSnapshot.has(task.id))
+  const newTasks = changedTasks.filter((task) => !knownTaskIds.has(task.id))
   const existingChangedTasks = changedTasks.filter((task) =>
-    previousSnapshot.has(task.id),
+    knownTaskIds.has(task.id),
   )
 
   for (const task of existingChangedTasks) {
@@ -652,6 +652,7 @@ async function saveSupabaseTasks(tasks, userId, previousSnapshot) {
 
   return {
     nextSnapshot,
+    nextKnownTaskIds: new Set([...knownTaskIds, ...newTasks.map((task) => task.id)]),
     changedCount: changedTasks.length,
     removedCount: removedTaskIds.length,
   }
@@ -862,6 +863,7 @@ function App() {
   const pomodoroSoundEnabledRef = useRef(pomodoro.soundEnabled)
   const onlineLoadedRef = useRef(false)
   const onlineTasksSnapshotRef = useRef(new Map())
+  const onlineKnownTaskIdsRef = useRef(new Set())
   const onlineSaveImmediatelyRef = useRef(false)
   const onlineSaveInFlightRef = useRef(false)
   const onlineSaveQueuedRef = useRef(false)
@@ -1323,6 +1325,7 @@ function App() {
 
         onlineLoadedRef.current = false
         onlineTasksSnapshotRef.current = new Map()
+        onlineKnownTaskIdsRef.current = new Set()
         onlineSaveInFlightRef.current = false
         onlineSaveQueuedRef.current = false
         onlineSaveVersionRef.current += 1
@@ -1343,6 +1346,7 @@ function App() {
     if (storageMode === 'local') {
       onlineLoadedRef.current = false
       onlineTasksSnapshotRef.current = new Map()
+      onlineKnownTaskIdsRef.current = new Set()
       onlineSaveInFlightRef.current = false
       onlineSaveQueuedRef.current = false
       onlineSaveVersionRef.current += 1
@@ -1365,6 +1369,7 @@ function App() {
     if (!sessionUserId) {
       onlineLoadedRef.current = false
       onlineTasksSnapshotRef.current = new Map()
+      onlineKnownTaskIdsRef.current = new Set()
       onlineSaveInFlightRef.current = false
       onlineSaveQueuedRef.current = false
       onlineSaveVersionRef.current += 1
@@ -1389,6 +1394,7 @@ function App() {
         }
 
         onlineTasksSnapshotRef.current = createSupabaseTasksSnapshot(onlineTasks)
+        onlineKnownTaskIdsRef.current = new Set(onlineTasks.map((task) => task.id))
         onlineLoadedRef.current = true
         setTasks(onlineTasks)
         setSyncStatus('synced')
@@ -1468,10 +1474,12 @@ function App() {
           onlineLatestTasksRef.current,
           sessionUserId,
           onlineTasksSnapshotRef.current,
+          onlineKnownTaskIdsRef.current,
         )
 
         if (storageMode === 'online') {
           onlineTasksSnapshotRef.current = saveResult.nextSnapshot
+          onlineKnownTaskIdsRef.current = saveResult.nextKnownTaskIds
 
           if (!cancelled) {
             setSyncStatus('synced')
@@ -1701,6 +1709,7 @@ function App() {
     setSession(null)
     onlineLoadedRef.current = false
     onlineTasksSnapshotRef.current = new Map()
+    onlineKnownTaskIdsRef.current = new Set()
     setTasks(readStoredTasks())
     setStorageMode('local')
   }
@@ -1719,9 +1728,11 @@ function App() {
         localTasks,
         session.user.id,
         onlineTasksSnapshotRef.current,
+        onlineKnownTaskIdsRef.current,
       )
 
       onlineTasksSnapshotRef.current = saveResult.nextSnapshot
+      onlineKnownTaskIdsRef.current = saveResult.nextKnownTaskIds
       onlineLoadedRef.current = true
       setTasks(localTasks)
       setSyncStatus('synced')
@@ -1853,6 +1864,10 @@ function App() {
           }
 
           onlineTasksSnapshotRef.current = nextSnapshot
+          onlineKnownTaskIdsRef.current = new Set([
+            ...onlineKnownTaskIdsRef.current,
+            ...affectedTaskIdsForOnlineSave,
+          ])
           onlineSaveVersionRef.current += 1
           setSyncStatus('synced')
           setSyncMessage('Онлайн-сохранение выполнено')
