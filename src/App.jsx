@@ -667,7 +667,7 @@ async function saveSupabaseTaskCompletion(tasks, userId, taskIds) {
       continue
     }
 
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('tasks')
       .update({
         completed: Boolean(task.completed),
@@ -677,9 +677,14 @@ async function saveSupabaseTaskCompletion(tasks, userId, taskIds) {
       })
       .eq('user_id', userId)
       .eq('id', task.id)
+      .select('id,completed,completed_at')
 
     if (error) {
       throw error
+    }
+
+    if (!data || data.length === 0) {
+      throw new Error(`Supabase не обновил задачу ${task.id}`)
     }
   }
 }
@@ -1824,8 +1829,7 @@ function App() {
     if (
       storageMode === 'online' &&
       supabase &&
-      sessionUserId &&
-      onlineLoadedRef.current
+      sessionUserId
     ) {
       setSyncStatus('saving')
       setSyncMessage('Сохранение онлайн')
@@ -1859,6 +1863,11 @@ function App() {
             error.message || 'Не удалось сохранить онлайн-задачи',
           )
         })
+    }
+
+    if (storageMode === 'online' && (!supabase || !sessionUserId)) {
+      setSyncStatus('error')
+      setSyncMessage('Онлайн-задача не сохранена: нет активной Supabase-сессии')
     }
   }
 
