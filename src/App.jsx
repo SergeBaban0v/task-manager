@@ -645,6 +645,33 @@ async function saveSupabaseTasks(tasks, userId, previousSnapshot) {
   }
 }
 
+async function saveSupabaseTaskCompletion(tasks, userId, taskIds) {
+  const targetTaskIds = [...taskIds]
+
+  for (const taskId of targetTaskIds) {
+    const task = tasks.find((currentTask) => currentTask.id === taskId)
+
+    if (!task) {
+      continue
+    }
+
+    const { error } = await supabase
+      .from('tasks')
+      .update({
+        completed: Boolean(task.completed),
+        completed_at: task.completedAt,
+        hold_until: task.holdUntil,
+        updated_at: Date.now(),
+      })
+      .eq('user_id', userId)
+      .eq('id', task.id)
+
+    if (error) {
+      throw error
+    }
+  }
+}
+
 function isTaskClosed(task) {
   return Boolean(task.completed)
 }
@@ -1750,21 +1777,26 @@ function App() {
   }
 
   function toggleTask(taskId) {
-    onlineSaveImmediatelyRef.current = true
-    setTasks((currentTasks) =>
-      normalizeParallelGroups(
-        currentTasks.map((task) => {
-          const targetTask = currentTasks.find(
-            (currentTask) => currentTask.id === taskId,
-          )
-          const affectedTaskIds = new Set(
-            targetTask
-              ? getParallelGroupTasks(targetTask, currentTasks).map(
-                  (groupTask) => groupTask.id,
-                )
-              : [taskId],
-          )
+    let nextTasksForOnlineSave = null
+    let affectedTaskIdsForOnlineSave = new Set()
 
+    onlineSaveImmediatelyRef.current = false
+    setTasks((currentTasks) => {
+      const targetTask = currentTasks.find(
+        (currentTask) => currentTask.id === taskId,
+      )
+      const affectedTaskIds = new Set(
+        targetTask
+          ? getParallelGroupTasks(targetTask, currentTasks).map(
+              (groupTask) => groupTask.id,
+            )
+          : [taskId],
+      )
+
+      affectedTaskIdsForOnlineSave = affectedTaskIds
+
+      const nextTasks = normalizeParallelGroups(
+        currentTasks.map((task) => {
           if (!affectedTaskIds.has(task.id)) {
             return task
           }
@@ -1780,8 +1812,44 @@ function App() {
             holdUntil: null,
           }
         }),
-      ),
-    )
+      )
+
+      nextTasksForOnlineSave = nextTasks
+      onlineLatestTasksRef.current = nextTasks
+
+      return nextTasks
+    })
+
+    if (
+      storageMode === 'online' &&
+      supabase &&
+      sessionUserId &&
+      onlineLoadedRef.current &&
+      nextTasksForOnlineSave
+    ) {
+      setSyncStatus('saving')
+      setSyncMessage('Сохранение онлайн')
+
+      saveSupabaseTaskCompletion(
+        nextTasksForOnlineSave,
+        sessionUserId,
+        affectedTaskIdsForOnlineSave,
+      )
+        .then(() => {
+          onlineTasksSnapshotRef.current = createSupabaseTasksSnapshot(
+            nextTasksForOnlineSave,
+          )
+          onlineSaveVersionRef.current += 1
+          setSyncStatus('synced')
+          setSyncMessage('Онлайн-сохранение выполнено')
+        })
+        .catch((error) => {
+          setSyncStatus('error')
+          setSyncMessage(
+            error.message || 'Не удалось сохранить онлайн-задачи',
+          )
+        })
+    }
   }
 
   function addHoldStep(taskId) {
