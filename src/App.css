@@ -412,6 +412,16 @@
   height: 8px;
   border-radius: 999px;
   background: #94a3b8;
+  cursor: help;
+}
+
+.sync-dot::after {
+  content: '';
+  position: absolute;
+  left: -12px;
+  top: 8px;
+  width: 240px;
+  height: 12px;
 }
 
 .sync-dot.synced {
@@ -453,6 +463,10 @@
 .sync-dot:focus .sync-popover,
 .sync-dot:focus-within .sync-popover {
   display: block;
+}
+
+.sync-dot.error .sync-popover {
+  border-color: rgba(220, 38, 38, 0.35);
 }
 
 .storage-status,
@@ -951,6 +965,7 @@
 .hold-dialog,
 .confirm-dialog,
 .pomodoro-help-dialog,
+.sync-log-dialog,
 .detail-dialog {
   position: relative;
   width: min(360px, 100%);
@@ -970,6 +985,13 @@
 .pomodoro-help-dialog {
   width: min(520px, 100%);
   padding-right: 48px;
+}
+
+.sync-log-dialog {
+  width: min(760px, 100%);
+  max-height: min(720px, calc(100svh - 32px));
+  padding-right: 48px;
+  overflow: hidden;
 }
 
 .detail-dialog {
@@ -1005,6 +1027,7 @@
 .hold-dialog h2,
 .confirm-dialog h2,
 .pomodoro-help-dialog h2,
+.sync-log-dialog h2,
 .detail-dialog h2 {
   margin: 0;
   color: var(--text-strong);
@@ -1021,6 +1044,94 @@
 
 .pomodoro-help-dialog p {
   line-height: 1.5;
+}
+
+.sync-log-settings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.sync-log-settings label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.sync-log-settings input[type='number'] {
+  width: 72px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+}
+
+.sync-log-list {
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  overflow: auto;
+  list-style: none;
+}
+
+.sync-log-event {
+  display: grid;
+  grid-template-columns: 150px 88px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.sync-log-event time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-log-event span {
+  font-weight: 750;
+}
+
+.sync-log-event.error span {
+  color: var(--danger);
+}
+
+.sync-log-event.warning span {
+  color: #b7791f;
+}
+
+.sync-log-event.info span {
+  color: var(--accent);
+}
+
+.sync-log-event p,
+.sync-log-empty {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+@media (max-width: 680px) {
+  .sync-log-event {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
 }
 
 .hold-dialog label,

@@ -22,6 +22,7 @@ const HOLD_REPEAT_MIN_MS = 70
 const HOLD_REPEAT_ACCELERATION = 0.78
 const INSTANCE_HEARTBEAT_MS = 2000
 const INSTANCE_STALE_MS = 8000
+const DEFAULT_SYNC_LOG_LIMIT = 20
 const DEFAULT_PRIORITY = 'medium'
 const PRIORITY_MENU_WIDTH = 184
 const PRIORITY_MENU_HEIGHT = 202
@@ -909,6 +910,14 @@ function App() {
   const [authEmail, setAuthEmail] = useState('')
   const [syncStatus, setSyncStatus] = useState('idle')
   const [syncMessage, setSyncMessage] = useState('')
+  const [syncEvents, setSyncEvents] = useState([])
+  const [syncLogSnapshot, setSyncLogSnapshot] = useState(null)
+  const [syncLogLimit, setSyncLogLimit] = useState(DEFAULT_SYNC_LOG_LIMIT)
+  const [syncLogLevels, setSyncLogLevels] = useState({
+    error: true,
+    warning: true,
+    info: true,
+  })
   const [instanceStatus, setInstanceStatus] = useState('checking')
   const [taskText, setTaskText] = useState('')
   const [now, setNow] = useState(() => Date.now())
@@ -951,6 +960,33 @@ function App() {
     instanceStatusRef.current = nextStatus
     setInstanceStatus(nextStatus)
   }, [])
+
+  const addSyncEvent = useCallback(
+    (level, message) => {
+      if (!message) {
+        return
+      }
+
+      setSyncEvents((currentEvents) => [
+        {
+          id: getStableTaskId(),
+          timestamp: Date.now(),
+          level,
+          message,
+        },
+        ...currentEvents,
+      ].slice(0, syncLogLimit))
+    },
+    [syncLogLimit],
+  )
+
+  const updateSyncStatus = useCallback(
+    (status, message) => {
+      setSyncStatus(status)
+      setSyncMessage(message)
+    },
+    [],
+  )
 
   function clearHoldRepeat() {
     if (!holdRepeatRef.current) {
@@ -1125,6 +1161,25 @@ function App() {
     updateInstanceStatus('blocked')
     return false
   }, [updateInstanceStatus])
+
+  useEffect(() => {
+    if (!syncMessage) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      addSyncEvent(
+        syncStatus === 'error'
+          ? 'error'
+          : syncStatus === 'saving'
+            ? 'warning'
+            : 'info',
+        syncMessage,
+      )
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [addSyncEvent, syncMessage, syncStatus])
 
   useEffect(() => {
     const instanceId = instanceIdRef.current
@@ -1367,13 +1422,15 @@ function App() {
       return undefined
     }
 
-    if (!detailEditor && !deleteConfirmation && !pomodoroHelpOpen) {
+    if (!detailEditor && !deleteConfirmation && !pomodoroHelpOpen && !syncLogSnapshot) {
       return undefined
     }
 
     function closeOnEscape(event) {
       if (event.key === 'Escape') {
-        if (pomodoroHelpOpen) {
+        if (syncLogSnapshot) {
+          closeSyncLog()
+        } else if (pomodoroHelpOpen) {
           setPomodoroHelpOpen(false)
         } else if (deleteConfirmation) {
           closeDeleteConfirmation()
@@ -1386,7 +1443,7 @@ function App() {
     document.addEventListener('keydown', closeOnEscape)
 
     return () => document.removeEventListener('keydown', closeOnEscape)
-  }, [detailEditor, deleteConfirmation, instanceActive, pomodoroHelpOpen])
+  }, [detailEditor, deleteConfirmation, instanceActive, pomodoroHelpOpen, syncLogSnapshot])
 
   useEffect(() => {
     if (!instanceActive) {
@@ -1614,7 +1671,7 @@ function App() {
 
     if (!supabase) {
       queueMicrotask(() => {
-        setSyncStatus('error')
+        updateSyncStatus('error', 'Supabase is not configured')
         setSyncMessage('Supabase не настроен')
       })
       return
@@ -1666,7 +1723,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [instanceActive, storageMode, sessionUserId])
+  }, [instanceActive, storageMode, sessionUserId, updateSyncStatus])
 
   useEffect(() => {
     if (!instanceActive) {
@@ -1706,17 +1763,11 @@ function App() {
 
     let cancelled = false
     const saveImmediately = onlineSaveImmediatelyRef.current
-    const scheduledSaveVersion = onlineSaveVersionRef.current
     onlineSaveImmediatelyRef.current = false
 
-    async function persistOnlineTasks(expectedSaveVersion) {
-      if (expectedSaveVersion !== onlineSaveVersionRef.current) {
-        return
-      }
-
+    async function persistOnlineTasks() {
       if (onlineSaveInFlightRef.current) {
         onlineSaveQueuedRef.current = true
-        onlineSaveVersionRef.current += 1
         return
       }
 
@@ -1728,22 +1779,27 @@ function App() {
           setSyncMessage('Сохранение онлайн')
         }
 
-        const saveResult = await saveSupabaseTasks(
-          onlineLatestTasksRef.current,
-          sessionUserId,
-          onlineTasksSnapshotRef.current,
-          onlineKnownTaskIdsRef.current,
-        )
+        do {
+          onlineSaveQueuedRef.current = false
+
+          const saveResult = await saveSupabaseTasks(
+            onlineLatestTasksRef.current,
+            sessionUserId,
+            onlineTasksSnapshotRef.current,
+            onlineKnownTaskIdsRef.current,
+          )
 
         if (storageMode === 'online') {
           onlineTasksSnapshotRef.current = saveResult.nextSnapshot
-          onlineKnownTaskIdsRef.current = saveResult.nextKnownTaskIds
+          onlineKnownTaskIdsRef.current =
+            saveResult.nextKnownTaskIds || onlineKnownTaskIdsRef.current
 
           if (!cancelled) {
             setSyncStatus('synced')
             setSyncMessage('Онлайн-сохранение выполнено')
           }
-        }
+          }
+        } while (onlineSaveQueuedRef.current && storageMode === 'online')
       } catch (error) {
         if (!cancelled) {
           setSyncStatus('error')
@@ -1757,7 +1813,7 @@ function App() {
           storageMode === 'online'
         ) {
           onlineSaveQueuedRef.current = false
-          persistOnlineTasks(onlineSaveVersionRef.current)
+          window.setTimeout(persistOnlineTasks, 0)
         }
       }
     }
@@ -1766,7 +1822,7 @@ function App() {
     setSyncMessage('Онлайн-сохранение ожидает паузы в изменениях')
 
     if (saveImmediately) {
-      persistOnlineTasks(scheduledSaveVersion)
+      persistOnlineTasks()
 
       return () => {
         cancelled = true
@@ -1774,7 +1830,7 @@ function App() {
     }
 
     const timeoutId = window.setTimeout(() => {
-      persistOnlineTasks(scheduledSaveVersion)
+      persistOnlineTasks()
     }, ONLINE_SAVE_DEBOUNCE_MS)
 
     return () => {
@@ -1907,6 +1963,35 @@ function App() {
     () => tasks.filter((task) => !task.completed).length,
     [tasks],
   )
+  const visibleSyncEvents = useMemo(() => {
+    const sourceEvents = syncLogSnapshot || syncEvents
+
+    return sourceEvents
+      .filter((event) => syncLogLevels[event.level])
+      .slice(0, syncLogLimit)
+  }, [syncEvents, syncLogLevels, syncLogLimit, syncLogSnapshot])
+
+  function openSyncLog() {
+    setSyncLogSnapshot(syncEvents.slice(0, syncLogLimit))
+  }
+
+  function closeSyncLog() {
+    setSyncLogSnapshot(null)
+  }
+
+  function updateSyncLogLimit(value) {
+    const nextLimit = Math.max(5, Math.min(100, Number(value) || DEFAULT_SYNC_LOG_LIMIT))
+
+    setSyncLogLimit(nextLimit)
+    setSyncEvents((currentEvents) => currentEvents.slice(0, nextLimit))
+  }
+
+  function toggleSyncLogLevel(level) {
+    setSyncLogLevels((currentLevels) => ({
+      ...currentLevels,
+      [level]: !currentLevels[level],
+    }))
+  }
 
   function switchStorageMode(nextStorageMode) {
     if (nextStorageMode === storageMode) {
@@ -2992,6 +3077,8 @@ function App() {
                   className={`sync-dot ${syncStatus}`}
                   aria-label={syncMessage || 'Статус онлайн-синхронизации'}
                   tabIndex={0}
+                  onDoubleClick={openSyncLog}
+                  title="Двойной клик - журнал событий"
                 >
                   <span className="sync-popover" role="status">
                     {syncMessage || 'Онлайн-режим'}
@@ -3441,6 +3528,88 @@ function App() {
               работы и отдыха можно настроить правым кликом по большому
               помидору.
             </p>
+          </section>
+        </div>
+      ) : null}
+
+      {syncLogSnapshot ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeSyncLog()
+            }
+          }}
+        >
+          <section className="sync-log-dialog" role="dialog" aria-modal="true">
+            <button
+              className="dialog-close-button"
+              type="button"
+              onClick={closeSyncLog}
+              aria-label="Закрыть журнал событий"
+              title="Закрыть"
+            >
+              <span aria-hidden="true">×</span>
+            </button>
+            <h2>Журнал синхронизации</h2>
+            <div className="sync-log-settings">
+              <label>
+                <span>Хранить последних</span>
+                <input
+                  type="number"
+                  min="5"
+                  max="100"
+                  value={syncLogLimit}
+                  onChange={(event) => updateSyncLogLimit(event.target.value)}
+                />
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={syncLogLevels.error}
+                  onChange={() => toggleSyncLogLevel('error')}
+                />
+                <span>Ошибки</span>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={syncLogLevels.warning}
+                  onChange={() => toggleSyncLogLevel('warning')}
+                />
+                <span>Предупреждения</span>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={syncLogLevels.info}
+                  onChange={() => toggleSyncLogLevel('info')}
+                />
+                <span>Информация</span>
+              </label>
+            </div>
+            {visibleSyncEvents.length > 0 ? (
+              <ul className="sync-log-list">
+                {visibleSyncEvents.map((event) => (
+                  <li className={`sync-log-event ${event.level}`} key={event.id}>
+                    <time dateTime={new Date(event.timestamp).toISOString()}>
+                      {new Date(event.timestamp).toLocaleString('ru-RU')}
+                    </time>
+                    <span>
+                      {event.level === 'error'
+                        ? 'Ошибка'
+                        : event.level === 'warning'
+                          ? 'Предупреждение'
+                          : 'Информация'}
+                    </span>
+                    <p>{event.message}</p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="sync-log-empty">Нет событий для выбранных уровней.</p>
+            )}
           </section>
         </div>
       ) : null}
