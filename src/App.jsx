@@ -32,9 +32,11 @@ const INITIAL_WINDOW_HEIGHT = 720
 const ONLINE_SAVE_DEBOUNCE_MS = 900
 const DEFAULT_POMODORO_STATE = {
   enabled: true,
+  soundEnabled: true,
   workMinutes: 25,
   breakMinutes: 5,
   selectedTaskId: null,
+  needsTaskSelection: false,
   mode: 'idle',
   startedAt: null,
   finishedWorkTaskId: null,
@@ -400,6 +402,10 @@ function readPomodoroState() {
         typeof safeState.enabled === 'boolean'
           ? safeState.enabled
           : DEFAULT_POMODORO_STATE.enabled,
+      soundEnabled:
+        typeof safeState.soundEnabled === 'boolean'
+          ? safeState.soundEnabled
+          : DEFAULT_POMODORO_STATE.soundEnabled,
       workMinutes: Number.isFinite(Number(safeState.workMinutes))
         ? Math.min(180, Math.max(1, Number(safeState.workMinutes)))
         : DEFAULT_POMODORO_STATE.workMinutes,
@@ -410,6 +416,7 @@ function readPomodoroState() {
         typeof safeState.selectedTaskId === 'string'
           ? safeState.selectedTaskId
           : null,
+      needsTaskSelection: Boolean(safeState.needsTaskSelection),
       mode,
       startedAt: isFiniteTimestamp(safeState.startedAt)
         ? safeState.startedAt
@@ -790,6 +797,7 @@ function App() {
   const [frozenTaskOrder, setFrozenTaskOrder] = useState(null)
   const holdRepeatRef = useRef(null)
   const pomodoroAudioContextRef = useRef(null)
+  const pomodoroSoundEnabledRef = useRef(pomodoro.soundEnabled)
   const onlineLoadedRef = useRef(false)
   const onlineTasksSnapshotRef = useRef(new Map())
   const taskItemRefs = useRef(new Map())
@@ -836,6 +844,10 @@ function App() {
   }
 
   function playPomodoroBeep() {
+    if (!pomodoroSoundEnabledRef.current) {
+      return
+    }
+
     const AudioContext = window.AudioContext || window.webkitAudioContext
 
     if (!AudioContext) {
@@ -859,6 +871,39 @@ function App() {
     gain.connect(audioContext.destination)
     oscillator.start()
     oscillator.stop(audioContext.currentTime + 0.22)
+  }
+
+  function playPomodoroTickTock(tone = 'tick') {
+    if (!pomodoroSoundEnabledRef.current) {
+      return
+    }
+
+    const AudioContext = window.AudioContext || window.webkitAudioContext
+
+    if (!AudioContext) {
+      return
+    }
+
+    const audioContext =
+      pomodoroAudioContextRef.current || new AudioContext()
+    pomodoroAudioContextRef.current = audioContext
+
+    const oscillator = audioContext.createOscillator()
+    const gain = audioContext.createGain()
+
+    oscillator.type = 'square'
+    oscillator.frequency.setValueAtTime(
+      tone === 'tick' ? 760 : 520,
+      audioContext.currentTime,
+    )
+    gain.gain.setValueAtTime(0.0001, audioContext.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.055, audioContext.currentTime + 0.01)
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.08)
+
+    oscillator.connect(gain)
+    gain.connect(audioContext.destination)
+    oscillator.start()
+    oscillator.stop(audioContext.currentTime + 0.09)
   }
 
   function getPriorityMenuPosition(buttonElement) {
@@ -1054,6 +1099,7 @@ function App() {
 
   useEffect(() => {
     writePomodoroState(pomodoro)
+    pomodoroSoundEnabledRef.current = pomodoro.soundEnabled
   }, [pomodoro])
 
   useEffect(() => {
@@ -1066,7 +1112,34 @@ function App() {
     )
 
     if (activeSelectedTask) {
+      if (pomodoro.needsTaskSelection) {
+        const timeoutId = window.setTimeout(() => {
+          setPomodoro((current) => ({
+            ...current,
+            needsTaskSelection: false,
+          }))
+        }, 0)
+
+        return () => window.clearTimeout(timeoutId)
+      }
+
       return
+    }
+
+    if (pomodoro.mode === 'work') {
+      if (pomodoro.needsTaskSelection) {
+        return
+      }
+
+      const timeoutId = window.setTimeout(() => {
+        setPomodoro((current) => ({
+          ...current,
+          selectedTaskId: null,
+          needsTaskSelection: true,
+        }))
+      }, 0)
+
+      return () => window.clearTimeout(timeoutId)
     }
 
     const firstActiveTask = tasks.find((task) => !task.completed)
@@ -1074,6 +1147,7 @@ function App() {
       setPomodoro((current) => ({
         ...current,
         selectedTaskId: firstActiveTask?.id || null,
+        needsTaskSelection: false,
         mode: 'idle',
         startedAt: null,
         finishedWorkTaskId: null,
@@ -1081,7 +1155,13 @@ function App() {
     }, 0)
 
     return () => window.clearTimeout(timeoutId)
-  }, [tasks, pomodoro.enabled, pomodoro.selectedTaskId])
+  }, [
+    tasks,
+    pomodoro.enabled,
+    pomodoro.mode,
+    pomodoro.needsTaskSelection,
+    pomodoro.selectedTaskId,
+  ])
 
   useEffect(() => {
     if (
@@ -1132,6 +1212,25 @@ function App() {
 
     return () => window.clearInterval(intervalId)
   }, [pomodoro.enabled, pomodoro.mode])
+
+  useEffect(() => {
+    if (
+      !pomodoro.enabled ||
+      pomodoro.mode !== 'work' ||
+      !pomodoro.needsTaskSelection
+    ) {
+      return undefined
+    }
+
+    let tick = true
+    playPomodoroTickTock('tick')
+    const intervalId = window.setInterval(() => {
+      playPomodoroTickTock(tick ? 'tock' : 'tick')
+      tick = !tick
+    }, 620)
+
+    return () => window.clearInterval(intervalId)
+  }, [pomodoro.enabled, pomodoro.mode, pomodoro.needsTaskSelection])
 
   useEffect(() => {
     if (!supabase) {
@@ -1980,6 +2079,14 @@ function App() {
     return null
   }
 
+  function getPomodoroNeedsTaskSelection() {
+    return (
+      pomodoro.enabled &&
+      pomodoro.mode === 'work' &&
+      pomodoro.needsTaskSelection
+    )
+  }
+
   function getPomodoroTaskImage(taskState) {
     if (taskState === 'red') {
       return pomodoroTaskRedImage
@@ -1999,6 +2106,7 @@ function App() {
       setPomodoro((current) => ({
         ...current,
         enabled: true,
+        needsTaskSelection: false,
       }))
       return
     }
@@ -2027,6 +2135,7 @@ function App() {
       ...current,
       mode: 'work',
       startedAt: Date.now(),
+      needsTaskSelection: false,
       finishedWorkTaskId: null,
     }))
   }
@@ -2056,12 +2165,24 @@ function App() {
       enabled: !current.enabled,
       mode: 'idle',
       startedAt: null,
+      needsTaskSelection: false,
       finishedWorkTaskId: current.enabled ? null : current.finishedWorkTaskId,
     }))
   }
 
+  function togglePomodoroSound() {
+    setPomodoro((current) => ({
+      ...current,
+      soundEnabled: !current.soundEnabled,
+    }))
+  }
+
   function handlePomodoroDragStart(event, task) {
-    if (!pomodoro.enabled || task.completed || !getPomodoroTaskState(task)) {
+    if (
+      !pomodoro.enabled ||
+      task.completed ||
+      (!getPomodoroTaskState(task) && !pomodoroNeedsTaskSelection)
+    ) {
       event.preventDefault()
       return
     }
@@ -2088,6 +2209,7 @@ function App() {
     setPomodoro((current) => ({
       ...current,
       selectedTaskId: task.id,
+      needsTaskSelection: false,
       finishedWorkTaskId:
         current.mode === 'work' ? current.finishedWorkTaskId : null,
     }))
@@ -2188,6 +2310,7 @@ function App() {
     : null
   const pomodoroProgress = getPomodoroProgress(pomodoro, now)
   const pomodoroFillClipPath = getPomodoroFillClipPath(pomodoroProgress)
+  const pomodoroNeedsTaskSelection = getPomodoroNeedsTaskSelection()
   const pomodoroImage =
     pomodoro.mode === 'break' ? pomodoroBreakImage : pomodoroWorkImage
   const pomodoroMinutes =
@@ -2255,6 +2378,7 @@ function App() {
               pomodoro.enabled ? '' : 'disabled',
               pomodoro.mode === 'break' ? 'break' : '',
               pomodoro.mode === 'work-done' ? 'done' : '',
+              pomodoroNeedsTaskSelection ? 'needs-task' : '',
             ]
               .filter(Boolean)
               .join(' ')}
@@ -2273,6 +2397,21 @@ function App() {
             }
             title="Левый клик - старт или перерыв. Правый клик - настройки."
           >
+            {pomodoroNeedsTaskSelection ? (
+              <span
+                className="pomodoro-task-alert"
+                draggable
+                onDragStart={(event) => {
+                  event.dataTransfer.effectAllowed = 'move'
+                  event.dataTransfer.setData('text/plain', 'pomodoro-alert')
+                }}
+                title="Перетащите на незавершенную задачу."
+              >
+                <img src={pomodoroTaskRedImage} alt="" />
+                <img src={pomodoroTaskYellowImage} alt="" />
+                <img src={pomodoroTaskGreenImage} alt="" />
+              </span>
+            ) : null}
             <span className="pomodoro-tomato">
               <img className="pomodoro-tomato-dim" src={pomodoroImage} alt="" />
               <img
@@ -2649,6 +2788,14 @@ function App() {
                   onChange={togglePomodoroEnabled}
                 />
                 <span>Включить Pomodoro</span>
+              </label>
+              <label className="pomodoro-enabled-row">
+                <input
+                  type="checkbox"
+                  checked={pomodoro.soundEnabled}
+                  onChange={togglePomodoroSound}
+                />
+                <span>Звуковое сопровождение</span>
               </label>
               <button
                 className="pomodoro-help-button"
