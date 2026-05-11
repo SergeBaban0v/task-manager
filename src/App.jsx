@@ -1325,13 +1325,19 @@ function App() {
       const currentTime = Date.now()
 
       setNow(currentTime)
-      setTasks((currentTasks) =>
-        currentTasks.map((task) =>
-          task.holdUntil && task.holdUntil <= currentTime
-            ? { ...task, holdUntil: null }
-            : task,
-        ),
-      )
+      setTasks((currentTasks) => {
+        let changed = false
+        const nextTasks = currentTasks.map((task) => {
+          if (task.holdUntil && task.holdUntil <= currentTime) {
+            changed = true
+            return { ...task, holdUntil: null }
+          }
+
+          return task
+        })
+
+        return changed ? nextTasks : currentTasks
+      })
     }, 1000)
 
     return () => window.clearInterval(timerId)
@@ -1885,9 +1891,7 @@ function App() {
     function getParallelGroupHoldUntil(task) {
       const holdUntil = Math.max(
         ...getOpenParallelGroupTasks(task).map((groupTask) =>
-          groupTask.holdUntil && groupTask.holdUntil > now
-            ? groupTask.holdUntil
-            : 0,
+          groupTask.holdUntil || 0,
         ),
       )
 
@@ -1953,7 +1957,7 @@ function App() {
     const newTasks = sortedTasks.filter((task) => !frozenTaskOrder.includes(task.id))
 
     return [...frozenTasks, ...newTasks]
-  }, [tasks, now, showClosedTasks, taskById, frozenTaskOrder, searchQuery])
+  }, [tasks, showClosedTasks, taskById, frozenTaskOrder, searchQuery])
 
   const completedCount = useMemo(
     () => tasks.filter((task) => task.completed).length,
