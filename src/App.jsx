@@ -819,6 +819,9 @@ function App() {
   const onlineLoadedRef = useRef(false)
   const onlineTasksSnapshotRef = useRef(new Map())
   const onlineSaveImmediatelyRef = useRef(false)
+  const onlineSaveInFlightRef = useRef(false)
+  const onlineSaveQueuedRef = useRef(false)
+  const onlineLatestTasksRef = useRef(tasks)
   const taskItemRefs = useRef(new Map())
   const taskItemRects = useRef(new Map())
 
@@ -826,6 +829,7 @@ function App() {
     () => new Map(tasks.map((task) => [task.id, task])),
     [tasks],
   )
+  const sessionUserId = session?.user?.id || null
 
   function clearHoldRepeat() {
     if (!holdRepeatRef.current) {
@@ -1267,9 +1271,18 @@ function App() {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession)
-      onlineLoadedRef.current = false
-      onlineTasksSnapshotRef.current = new Map()
+      setSession((currentSession) => {
+        if (currentSession?.user?.id === nextSession?.user?.id) {
+          return currentSession
+        }
+
+        onlineLoadedRef.current = false
+        onlineTasksSnapshotRef.current = new Map()
+        onlineSaveInFlightRef.current = false
+        onlineSaveQueuedRef.current = false
+
+        return nextSession
+      })
     })
 
     return () => {
@@ -1284,6 +1297,8 @@ function App() {
     if (storageMode === 'local') {
       onlineLoadedRef.current = false
       onlineTasksSnapshotRef.current = new Map()
+      onlineSaveInFlightRef.current = false
+      onlineSaveQueuedRef.current = false
     }
   }, [storageMode])
 
@@ -1300,9 +1315,11 @@ function App() {
       return
     }
 
-    if (!session) {
+    if (!sessionUserId) {
       onlineLoadedRef.current = false
       onlineTasksSnapshotRef.current = new Map()
+      onlineSaveInFlightRef.current = false
+      onlineSaveQueuedRef.current = false
       queueMicrotask(() => {
         setSyncStatus('signed-out')
         setSyncMessage('Войдите, чтобы загрузить онлайн-задачи')
@@ -1317,7 +1334,7 @@ function App() {
         setSyncStatus('loading')
         setSyncMessage('Загрузка онлайн-задач')
 
-        const onlineTasks = await loadSupabaseTasks(session.user.id)
+        const onlineTasks = await loadSupabaseTasks(sessionUserId)
 
         if (cancelled) {
           return
@@ -1341,9 +1358,11 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [storageMode, session])
+  }, [storageMode, sessionUserId])
 
   useEffect(() => {
+    onlineLatestTasksRef.current = tasks
+
     if (storageMode === 'local') {
       onlineSaveImmediatelyRef.current = false
       writeStoredTasks(tasks)
@@ -1353,7 +1372,7 @@ function App() {
     if (
       storageMode !== 'online' ||
       !supabase ||
-      !session ||
+      !sessionUserId ||
       !onlineLoadedRef.current
     ) {
       return
@@ -1377,25 +1396,47 @@ function App() {
     onlineSaveImmediatelyRef.current = false
 
     async function persistOnlineTasks() {
+      if (onlineSaveInFlightRef.current) {
+        onlineSaveQueuedRef.current = true
+        return
+      }
+
+      onlineSaveInFlightRef.current = true
+
       try {
-        setSyncStatus('saving')
-        setSyncMessage('Сохранение онлайн')
+        if (!cancelled) {
+          setSyncStatus('saving')
+          setSyncMessage('Сохранение онлайн')
+        }
 
         const saveResult = await saveSupabaseTasks(
-          tasks,
-          session.user.id,
+          onlineLatestTasksRef.current,
+          sessionUserId,
           onlineTasksSnapshotRef.current,
         )
 
-        if (!cancelled) {
+        if (storageMode === 'online') {
           onlineTasksSnapshotRef.current = saveResult.nextSnapshot
-          setSyncStatus('synced')
-          setSyncMessage('Онлайн-сохранение выполнено')
+
+          if (!cancelled) {
+            setSyncStatus('synced')
+            setSyncMessage('Онлайн-сохранение выполнено')
+          }
         }
       } catch (error) {
         if (!cancelled) {
           setSyncStatus('error')
           setSyncMessage(error.message || 'Не удалось сохранить онлайн-задачи')
+        }
+      } finally {
+        onlineSaveInFlightRef.current = false
+
+        if (
+          onlineSaveQueuedRef.current &&
+          storageMode === 'online'
+        ) {
+          onlineSaveQueuedRef.current = false
+          persistOnlineTasks()
         }
       }
     }
@@ -1419,7 +1460,7 @@ function App() {
       cancelled = true
       window.clearTimeout(timeoutId)
     }
-  }, [tasks, storageMode, session])
+  }, [tasks, storageMode, sessionUserId])
 
   const visibleTasks = useMemo(() => {
     const activeTasks = []
