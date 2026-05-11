@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { createClient } from '@supabase/supabase-js'
 import pomodoroBreakImage from './assets/pomodoro-break.png'
@@ -11,6 +11,8 @@ import './App.css'
 const STORAGE_KEY = 'task-manager.tasks'
 const STORAGE_MODE_KEY = 'task-manager.storage-mode'
 const POMODORO_STORAGE_KEY = 'task-manager.pomodoro'
+const INSTANCE_LOCK_KEY = 'task-manager.instance-lock'
+const INSTANCE_CHANNEL_NAME = 'task-manager-instance'
 const STORAGE_VERSION = 2
 const HOLD_STEP_MINUTES = 15
 const HOLD_STEP_MS = HOLD_STEP_MINUTES * 60000
@@ -18,6 +20,8 @@ const HOLD_REPEAT_DELAY_MS = 420
 const HOLD_REPEAT_START_MS = 260
 const HOLD_REPEAT_MIN_MS = 70
 const HOLD_REPEAT_ACCELERATION = 0.78
+const INSTANCE_HEARTBEAT_MS = 2000
+const INSTANCE_STALE_MS = 8000
 const DEFAULT_PRIORITY = 'medium'
 const PRIORITY_MENU_WIDTH = 184
 const PRIORITY_MENU_HEIGHT = 202
@@ -380,6 +384,52 @@ function readStorageMode() {
 
 function writeStorageMode(storageMode) {
   localStorage.setItem(STORAGE_MODE_KEY, storageMode)
+}
+
+function readInstanceLock() {
+  try {
+    const savedLock = localStorage.getItem(INSTANCE_LOCK_KEY)
+
+    if (!savedLock) {
+      return null
+    }
+
+    const parsedLock = JSON.parse(savedLock)
+
+    if (
+      !parsedLock ||
+      typeof parsedLock.instanceId !== 'string' ||
+      !isFiniteTimestamp(parsedLock.updatedAt)
+    ) {
+      return null
+    }
+
+    return parsedLock
+  } catch {
+    return null
+  }
+}
+
+function writeInstanceLock(instanceId) {
+  localStorage.setItem(
+    INSTANCE_LOCK_KEY,
+    JSON.stringify({
+      instanceId,
+      updatedAt: Date.now(),
+    }),
+  )
+}
+
+function removeInstanceLock(instanceId) {
+  const currentLock = readInstanceLock()
+
+  if (currentLock?.instanceId === instanceId) {
+    localStorage.removeItem(INSTANCE_LOCK_KEY)
+  }
+}
+
+function isInstanceLockStale(lock) {
+  return !lock || Date.now() - lock.updatedAt > INSTANCE_STALE_MS
 }
 
 function readPomodoroState() {
@@ -859,6 +909,7 @@ function App() {
   const [authEmail, setAuthEmail] = useState('')
   const [syncStatus, setSyncStatus] = useState('idle')
   const [syncMessage, setSyncMessage] = useState('')
+  const [instanceStatus, setInstanceStatus] = useState('checking')
   const [taskText, setTaskText] = useState('')
   const [now, setNow] = useState(() => Date.now())
   const [holdEditor, setHoldEditor] = useState(null)
@@ -872,6 +923,8 @@ function App() {
   const [showClosedTasks, setShowClosedTasks] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [frozenTaskOrder, setFrozenTaskOrder] = useState(null)
+  const instanceIdRef = useRef(getStableTaskId())
+  const instanceStatusRef = useRef('checking')
   const holdRepeatRef = useRef(null)
   const pomodoroAudioContextRef = useRef(null)
   const pomodoroSoundEnabledRef = useRef(pomodoro.soundEnabled)
@@ -883,6 +936,7 @@ function App() {
   const onlineSaveQueuedRef = useRef(false)
   const onlineSaveVersionRef = useRef(0)
   const onlineLatestTasksRef = useRef(tasks)
+  const onlineCompletionVerificationTimeoutsRef = useRef([])
   const taskItemRefs = useRef(new Map())
   const taskItemRects = useRef(new Map())
 
@@ -891,6 +945,12 @@ function App() {
     [tasks],
   )
   const sessionUserId = session?.user?.id || null
+  const instanceActive = instanceStatus === 'active'
+
+  const updateInstanceStatus = useCallback((nextStatus) => {
+    instanceStatusRef.current = nextStatus
+    setInstanceStatus(nextStatus)
+  }, [])
 
   function clearHoldRepeat() {
     if (!holdRepeatRef.current) {
@@ -1049,7 +1109,125 @@ function App() {
     holdRepeatRef.current = repeatState
   }
 
+  const tryAcquireInstanceLock = useCallback(() => {
+    const instanceId = instanceIdRef.current
+    const currentLock = readInstanceLock()
+
+    if (currentLock?.instanceId === instanceId || isInstanceLockStale(currentLock)) {
+      writeInstanceLock(instanceId)
+
+      if (readInstanceLock()?.instanceId === instanceId) {
+        updateInstanceStatus('active')
+        return true
+      }
+    }
+
+    updateInstanceStatus('blocked')
+    return false
+  }, [updateInstanceStatus])
+
   useEffect(() => {
+    const instanceId = instanceIdRef.current
+    const channel =
+      typeof BroadcastChannel !== 'undefined'
+        ? new BroadcastChannel(INSTANCE_CHANNEL_NAME)
+        : null
+    let heartbeatId = null
+    let staleCheckId = null
+
+    function stopHeartbeat() {
+      if (heartbeatId) {
+        window.clearInterval(heartbeatId)
+        heartbeatId = null
+      }
+    }
+
+    function startHeartbeat() {
+      stopHeartbeat()
+      writeInstanceLock(instanceId)
+      heartbeatId = window.setInterval(() => {
+        if (readInstanceLock()?.instanceId !== instanceId) {
+          stopHeartbeat()
+          updateInstanceStatus('blocked')
+          return
+        }
+
+        writeInstanceLock(instanceId)
+        channel?.postMessage({ type: 'active', instanceId })
+      }, INSTANCE_HEARTBEAT_MS)
+    }
+
+    function acquireOrBlock() {
+      if (tryAcquireInstanceLock()) {
+        startHeartbeat()
+        channel?.postMessage({ type: 'active', instanceId })
+      } else {
+        stopHeartbeat()
+      }
+    }
+
+    channel?.addEventListener('message', (event) => {
+      const message = event.data
+
+      if (!message || message.instanceId === instanceId) {
+        return
+      }
+
+      if (message.type === 'ping' && instanceStatusRef.current === 'active') {
+        channel.postMessage({ type: 'active', instanceId })
+      }
+
+      if (message.type === 'active' && instanceStatusRef.current !== 'active') {
+        updateInstanceStatus('blocked')
+      }
+    })
+
+    function handleStorage(event) {
+      if (event.key !== INSTANCE_LOCK_KEY) {
+        return
+      }
+
+      const currentLock = readInstanceLock()
+
+      if (
+        currentLock &&
+        currentLock.instanceId !== instanceId &&
+        !isInstanceLockStale(currentLock)
+      ) {
+        stopHeartbeat()
+        updateInstanceStatus('blocked')
+      }
+    }
+
+    function releaseLock() {
+      removeInstanceLock(instanceId)
+    }
+
+    window.addEventListener('storage', handleStorage)
+    window.addEventListener('beforeunload', releaseLock)
+    channel?.postMessage({ type: 'ping', instanceId })
+    acquireOrBlock()
+    staleCheckId = window.setInterval(() => {
+      if (instanceStatusRef.current === 'blocked' && isInstanceLockStale(readInstanceLock())) {
+        acquireOrBlock()
+      }
+    }, 1000)
+
+    return () => {
+      stopHeartbeat()
+      window.clearInterval(staleCheckId)
+      window.removeEventListener('storage', handleStorage)
+      window.removeEventListener('beforeunload', releaseLock)
+      releaseLock()
+      channel?.close()
+    }
+  }, [tryAcquireInstanceLock, updateInstanceStatus])
+
+  useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     const isStandalone =
       window.matchMedia?.('(display-mode: standalone)').matches ||
       window.navigator.standalone
@@ -1081,9 +1259,13 @@ function App() {
     } catch {
       // Some browsers disallow programmatic resizing for PWA windows.
     }
-  }, [])
+  }, [instanceActive])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     const timerId = window.setInterval(() => {
       const currentTime = Date.now()
 
@@ -1098,9 +1280,13 @@ function App() {
     }, 1000)
 
     return () => window.clearInterval(timerId)
-  }, [])
+  }, [instanceActive])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     function stopRepeat() {
       clearHoldRepeat()
     }
@@ -1113,9 +1299,13 @@ function App() {
       window.removeEventListener('blur', stopRepeat)
       clearHoldRepeat()
     }
-  }, [])
+  }, [instanceActive])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return undefined
+    }
+
     if (!priorityMenuTaskId) {
       return undefined
     }
@@ -1127,9 +1317,22 @@ function App() {
       window.removeEventListener('resize', closePriorityMenu)
       document.removeEventListener('scroll', closePriorityMenu, true)
     }
-  }, [priorityMenuTaskId])
+  }, [instanceActive, priorityMenuTaskId])
+
+  useEffect(
+    () => () => {
+      for (const timeoutId of onlineCompletionVerificationTimeoutsRef.current) {
+        window.clearTimeout(timeoutId)
+      }
+    },
+    [],
+  )
 
   useEffect(() => {
+    if (!instanceActive) {
+      return undefined
+    }
+
     if (!pomodoroMenuPosition) {
       return undefined
     }
@@ -1157,9 +1360,13 @@ function App() {
       document.removeEventListener('keydown', closeOnEscape)
       document.removeEventListener('mousedown', closeOnOutsideClick)
     }
-  }, [pomodoroMenuPosition])
+  }, [instanceActive, pomodoroMenuPosition])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return undefined
+    }
+
     if (!detailEditor && !deleteConfirmation && !pomodoroHelpOpen) {
       return undefined
     }
@@ -1179,14 +1386,22 @@ function App() {
     document.addEventListener('keydown', closeOnEscape)
 
     return () => document.removeEventListener('keydown', closeOnEscape)
-  }, [detailEditor, deleteConfirmation, pomodoroHelpOpen])
+  }, [detailEditor, deleteConfirmation, instanceActive, pomodoroHelpOpen])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     writePomodoroState(pomodoro)
     pomodoroSoundEnabledRef.current = pomodoro.soundEnabled
-  }, [pomodoro])
+  }, [instanceActive, pomodoro])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     if (!pomodoro.enabled) {
       return
     }
@@ -1242,12 +1457,17 @@ function App() {
   }, [
     tasks,
     pomodoro.enabled,
+    instanceActive,
     pomodoro.mode,
     pomodoro.needsTaskSelection,
     pomodoro.selectedTaskId,
   ])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     if (
       !pomodoro.enabled ||
       !pomodoro.startedAt ||
@@ -1284,9 +1504,13 @@ function App() {
     }, 0)
 
     return () => window.clearTimeout(timeoutId)
-  }, [now, pomodoro])
+  }, [instanceActive, now, pomodoro])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return undefined
+    }
+
     if (!pomodoro.enabled || pomodoro.mode !== 'work-done') {
       return undefined
     }
@@ -1295,9 +1519,13 @@ function App() {
     const intervalId = window.setInterval(playPomodoroBeep, 900)
 
     return () => window.clearInterval(intervalId)
-  }, [pomodoro.enabled, pomodoro.mode])
+  }, [instanceActive, pomodoro.enabled, pomodoro.mode])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return undefined
+    }
+
     if (
       !pomodoro.enabled ||
       pomodoro.mode !== 'work' ||
@@ -1314,9 +1542,13 @@ function App() {
     }, 620)
 
     return () => window.clearInterval(intervalId)
-  }, [pomodoro.enabled, pomodoro.mode, pomodoro.needsTaskSelection])
+  }, [instanceActive, pomodoro.enabled, pomodoro.mode, pomodoro.needsTaskSelection])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return undefined
+    }
+
     if (!supabase) {
       return undefined
     }
@@ -1352,9 +1584,13 @@ function App() {
       mounted = false
       subscription.unsubscribe()
     }
-  }, [])
+  }, [instanceActive])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     writeStorageMode(storageMode)
 
     if (storageMode === 'local') {
@@ -1365,9 +1601,13 @@ function App() {
       onlineSaveQueuedRef.current = false
       onlineSaveVersionRef.current += 1
     }
-  }, [storageMode])
+  }, [instanceActive, storageMode])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     if (storageMode !== 'online') {
       return
     }
@@ -1426,9 +1666,13 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [storageMode, sessionUserId])
+  }, [instanceActive, storageMode, sessionUserId])
 
   useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     onlineLatestTasksRef.current = tasks
     onlineSaveVersionRef.current += 1
 
@@ -1537,7 +1781,7 @@ function App() {
       cancelled = true
       window.clearTimeout(timeoutId)
     }
-  }, [tasks, storageMode, sessionUserId])
+  }, [instanceActive, tasks, storageMode, sessionUserId])
 
   const visibleTasks = useMemo(() => {
     const activeTasks = []
@@ -1883,6 +2127,10 @@ function App() {
             ...affectedTaskIdsForOnlineSave,
           ])
           onlineSaveVersionRef.current += 1
+          scheduleOnlineCompletionVerification(
+            nextTasksForOnlineSave,
+            affectedTaskIdsForOnlineSave,
+          )
           setSyncStatus('synced')
           setSyncMessage('Онлайн-сохранение выполнено')
         })
@@ -2377,6 +2625,75 @@ function App() {
     }))
   }
 
+  function scheduleOnlineCompletionVerification(nextTasks, taskIds) {
+    if (storageMode !== 'online' || !supabase || !sessionUserId) {
+      return
+    }
+
+    const verificationDelays = [2500, 9000, 22000, 45000]
+
+    for (const delay of verificationDelays) {
+      const timeoutId = window.setTimeout(async () => {
+        const tasksToVerify = nextTasks.filter((task) => taskIds.has(task.id))
+
+        if (tasksToVerify.length === 0) {
+          return
+        }
+
+        try {
+          const { data, error } = await supabase
+            .from('tasks')
+            .select('id,completed,completed_at')
+            .eq('user_id', sessionUserId)
+            .in(
+              'id',
+              tasksToVerify.map((task) => task.id),
+            )
+
+          if (error) {
+            throw error
+          }
+
+          const rowById = new Map((data || []).map((row) => [row.id, row]))
+          const revertedTaskIds = new Set(
+            tasksToVerify
+              .filter((task) => {
+                const row = rowById.get(task.id)
+
+                return (
+                  row &&
+                  (Boolean(row.completed) !== Boolean(task.completed) ||
+                    (row.completed_at || null) !== (task.completedAt || null))
+                )
+              })
+              .map((task) => task.id),
+          )
+
+          if (revertedTaskIds.size === 0) {
+            return
+          }
+
+          await saveSupabaseTaskCompletion(
+            tasksToVerify,
+            sessionUserId,
+            revertedTaskIds,
+          )
+          setSyncStatus('error')
+          setSyncMessage(
+            'Закрытие задачи было перезаписано и восстановлено. Проверьте, не открыто ли приложение в другой вкладке или старой PWA-версии.',
+          )
+        } catch (error) {
+          setSyncStatus('error')
+          setSyncMessage(
+            error.message || 'Не удалось проверить онлайн-закрытие задачи',
+          )
+        }
+      }, delay)
+
+      onlineCompletionVerificationTimeoutsRef.current.push(timeoutId)
+    }
+  }
+
   function handlePomodoroDragStart(event, task) {
     if (
       !pomodoro.enabled ||
@@ -2533,6 +2850,31 @@ function App() {
       : `${String(pomodoroRemainingMinutes).padStart(2, '0')}:${String(
           pomodoroRemainingSeconds,
         ).padStart(2, '0')}`
+
+  if (!instanceActive) {
+    return (
+      <main className="app single-instance-screen">
+        <section className="single-instance-panel" aria-live="polite">
+          <p className="eyebrow">Task Manager</p>
+          <h1>
+            {instanceStatus === 'checking'
+              ? 'Проверяем активное окно'
+              : 'Приложение уже открыто'}
+          </h1>
+          <p>
+            {instanceStatus === 'checking'
+              ? 'Идет проверка, не запущен ли Task Manager в другой вкладке или окне.'
+              : 'На этом устройстве уже есть активное окно Task Manager. Закройте его, чтобы продолжить здесь.'}
+          </p>
+          {instanceStatus === 'blocked' ? (
+            <button type="button" onClick={tryAcquireInstanceLock}>
+              Проверить снова
+            </button>
+          ) : null}
+        </section>
+      </main>
+    )
+  }
 
   return (
     <main className="app">

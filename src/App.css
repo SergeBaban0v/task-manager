@@ -5,6 +5,49 @@
   place-items: start center;
 }
 
+.single-instance-screen {
+  min-height: 100svh;
+  place-items: center;
+}
+
+.single-instance-panel {
+  width: min(460px, 100%);
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.single-instance-panel h1 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 28px;
+  line-height: 1.2;
+}
+
+.single-instance-panel p:not(.eyebrow) {
+  margin: 14px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.single-instance-panel button {
+  margin-top: 20px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 8px;
+  color: #fff;
+  background: var(--accent);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.single-instance-panel button:hover {
+  background: var(--accent-hover);
+}
+
 .task-panel {
   width: 100%;
   max-height: calc(100svh - 20px);
