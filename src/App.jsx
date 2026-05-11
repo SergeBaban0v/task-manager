@@ -821,6 +821,7 @@ function App() {
   const onlineSaveImmediatelyRef = useRef(false)
   const onlineSaveInFlightRef = useRef(false)
   const onlineSaveQueuedRef = useRef(false)
+  const onlineSaveVersionRef = useRef(0)
   const onlineLatestTasksRef = useRef(tasks)
   const taskItemRefs = useRef(new Map())
   const taskItemRects = useRef(new Map())
@@ -1280,6 +1281,7 @@ function App() {
         onlineTasksSnapshotRef.current = new Map()
         onlineSaveInFlightRef.current = false
         onlineSaveQueuedRef.current = false
+        onlineSaveVersionRef.current += 1
 
         return nextSession
       })
@@ -1299,6 +1301,7 @@ function App() {
       onlineTasksSnapshotRef.current = new Map()
       onlineSaveInFlightRef.current = false
       onlineSaveQueuedRef.current = false
+      onlineSaveVersionRef.current += 1
     }
   }, [storageMode])
 
@@ -1320,6 +1323,7 @@ function App() {
       onlineTasksSnapshotRef.current = new Map()
       onlineSaveInFlightRef.current = false
       onlineSaveQueuedRef.current = false
+      onlineSaveVersionRef.current += 1
       queueMicrotask(() => {
         setSyncStatus('signed-out')
         setSyncMessage('Войдите, чтобы загрузить онлайн-задачи')
@@ -1362,6 +1366,7 @@ function App() {
 
   useEffect(() => {
     onlineLatestTasksRef.current = tasks
+    onlineSaveVersionRef.current += 1
 
     if (storageMode === 'local') {
       onlineSaveImmediatelyRef.current = false
@@ -1393,11 +1398,17 @@ function App() {
 
     let cancelled = false
     const saveImmediately = onlineSaveImmediatelyRef.current
+    const scheduledSaveVersion = onlineSaveVersionRef.current
     onlineSaveImmediatelyRef.current = false
 
-    async function persistOnlineTasks() {
+    async function persistOnlineTasks(expectedSaveVersion) {
+      if (expectedSaveVersion !== onlineSaveVersionRef.current) {
+        return
+      }
+
       if (onlineSaveInFlightRef.current) {
         onlineSaveQueuedRef.current = true
+        onlineSaveVersionRef.current += 1
         return
       }
 
@@ -1436,7 +1447,7 @@ function App() {
           storageMode === 'online'
         ) {
           onlineSaveQueuedRef.current = false
-          persistOnlineTasks()
+          persistOnlineTasks(onlineSaveVersionRef.current)
         }
       }
     }
@@ -1445,7 +1456,7 @@ function App() {
     setSyncMessage('Онлайн-сохранение ожидает паузы в изменениях')
 
     if (saveImmediately) {
-      persistOnlineTasks()
+      persistOnlineTasks(scheduledSaveVersion)
 
       return () => {
         cancelled = true
@@ -1453,7 +1464,7 @@ function App() {
     }
 
     const timeoutId = window.setTimeout(() => {
-      persistOnlineTasks()
+      persistOnlineTasks(scheduledSaveVersion)
     }, ONLINE_SAVE_DEBOUNCE_MS)
 
     return () => {
