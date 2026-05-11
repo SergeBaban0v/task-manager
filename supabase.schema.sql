@@ -9,9 +9,17 @@ create table if not exists public.tasks (
   completed_at bigint,
   created_at bigint not null,
   hold_until bigint,
+  deleted boolean not null default false,
+  deleted_at bigint,
   updated_at bigint not null,
   primary key (user_id, id)
 );
+
+alter table public.tasks
+  add column if not exists deleted boolean not null default false;
+
+alter table public.tasks
+  add column if not exists deleted_at bigint;
 
 alter table public.tasks enable row level security;
 

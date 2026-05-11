@@ -352,6 +352,8 @@ function taskToSupabaseRow(task, userId) {
     completed_at: task.completedAt,
     created_at: task.createdAt,
     hold_until: task.holdUntil,
+    deleted: false,
+    deleted_at: null,
     updated_at: Date.now(),
   }
 }
@@ -367,6 +369,8 @@ function supabaseRowToTask(row) {
     completedAt: row.completed_at,
     createdAt: row.created_at,
     holdUntil: row.hold_until,
+    deleted: Boolean(row.deleted),
+    deletedAt: row.deleted_at,
   }
 }
 
@@ -374,9 +378,10 @@ async function loadSupabaseTasks(userId) {
   const { data, error } = await supabase
     .from('tasks')
     .select(
-      'id,title,description,dependencies,priority,completed,completed_at,created_at,hold_until',
+      'id,title,description,dependencies,priority,completed,completed_at,created_at,hold_until,deleted,deleted_at',
     )
     .eq('user_id', userId)
+    .eq('deleted', false)
 
   if (error) {
     throw error
@@ -394,7 +399,11 @@ async function saveSupabaseTasks(tasks, userId, previousTaskIds) {
   if (removedTaskIds.length > 0) {
     const { error } = await supabase
       .from('tasks')
-      .delete()
+      .update({
+        deleted: true,
+        deleted_at: Date.now(),
+        updated_at: Date.now(),
+      })
       .eq('user_id', userId)
       .in('id', removedTaskIds)
 
