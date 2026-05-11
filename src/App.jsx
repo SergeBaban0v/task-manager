@@ -1789,55 +1789,43 @@ function App() {
   }
 
   function toggleTask(taskId) {
-    let nextTasksForOnlineSave = null
-    let affectedTaskIdsForOnlineSave = new Set()
+    const targetTask = tasks.find((currentTask) => currentTask.id === taskId)
+    const affectedTaskIdsForOnlineSave = new Set(
+      targetTask
+        ? getParallelGroupTasks(targetTask, tasks).map(
+            (groupTask) => groupTask.id,
+          )
+        : [taskId],
+    )
+    const nextCompletedAt = Date.now()
+    const nextTasksForOnlineSave = normalizeParallelGroups(
+      tasks.map((task) => {
+        if (!affectedTaskIdsForOnlineSave.has(task.id)) {
+          return task
+        }
+
+        if (targetTask?.completed) {
+          return { ...task, completed: false, completedAt: null }
+        }
+
+        return {
+          ...task,
+          completed: true,
+          completedAt: nextCompletedAt,
+          holdUntil: null,
+        }
+      }),
+    )
 
     onlineSaveImmediatelyRef.current = false
-    setTasks((currentTasks) => {
-      const targetTask = currentTasks.find(
-        (currentTask) => currentTask.id === taskId,
-      )
-      const affectedTaskIds = new Set(
-        targetTask
-          ? getParallelGroupTasks(targetTask, currentTasks).map(
-              (groupTask) => groupTask.id,
-            )
-          : [taskId],
-      )
-
-      affectedTaskIdsForOnlineSave = affectedTaskIds
-
-      const nextTasks = normalizeParallelGroups(
-        currentTasks.map((task) => {
-          if (!affectedTaskIds.has(task.id)) {
-            return task
-          }
-
-          if (targetTask?.completed) {
-            return { ...task, completed: false, completedAt: null }
-          }
-
-          return {
-            ...task,
-            completed: true,
-            completedAt: Date.now(),
-            holdUntil: null,
-          }
-        }),
-      )
-
-      nextTasksForOnlineSave = nextTasks
-      onlineLatestTasksRef.current = nextTasks
-
-      return nextTasks
-    })
+    onlineLatestTasksRef.current = nextTasksForOnlineSave
+    setTasks(nextTasksForOnlineSave)
 
     if (
       storageMode === 'online' &&
       supabase &&
       sessionUserId &&
-      onlineLoadedRef.current &&
-      nextTasksForOnlineSave
+      onlineLoadedRef.current
     ) {
       setSyncStatus('saving')
       setSyncMessage('Сохранение онлайн')
