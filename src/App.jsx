@@ -639,14 +639,28 @@ async function saveSupabaseTasks(tasks, userId, previousSnapshot, knownTaskIds) 
   }
 
   if (newTasks.length > 0) {
-    const { error } = await supabase
-      .from('tasks')
-      .upsert(newTasks.map((task) => taskToSupabaseRow(task, userId)), {
-        onConflict: 'user_id,id',
-      })
+    for (const task of newTasks) {
+      const { error } = await supabase
+        .from('tasks')
+        .insert(taskToSupabaseRow(task, userId))
 
-    if (error) {
-      throw error
+      if (!error) {
+        continue
+      }
+
+      if (error.code !== '23505') {
+        throw error
+      }
+
+      const { error: updateError } = await supabase
+        .from('tasks')
+        .update(taskToSupabaseExistingUpdateRow(task))
+        .eq('user_id', userId)
+        .eq('id', task.id)
+
+      if (updateError) {
+        throw updateError
+      }
     }
   }
 
