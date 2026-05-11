@@ -508,6 +508,19 @@ function taskToSupabaseRow(task, userId) {
   }
 }
 
+function taskToSupabaseExistingUpdateRow(task) {
+  return {
+    title: task.title,
+    description: task.description,
+    dependencies: getTaskDependencies(task),
+    parallel_group_id: task.parallelGroupId,
+    priority: getTaskPriority(task).id,
+    created_at: task.createdAt,
+    hold_until: task.holdUntil,
+    updated_at: Date.now(),
+  }
+}
+
 function getComparableSupabaseTask(task) {
   return {
     id: task.id,
@@ -614,12 +627,11 @@ async function saveSupabaseTasks(tasks, userId, previousSnapshot) {
   )
 
   for (const task of existingChangedTasks) {
-    const { id, user_id, ...updatedTask } = taskToSupabaseRow(task, userId)
     const { error } = await supabase
       .from('tasks')
-      .update(updatedTask)
-      .eq('user_id', user_id)
-      .eq('id', id)
+      .update(taskToSupabaseExistingUpdateRow(task))
+      .eq('user_id', userId)
+      .eq('id', task.id)
 
     if (error) {
       throw error
@@ -1836,9 +1848,19 @@ function App() {
         affectedTaskIdsForOnlineSave,
       )
         .then(() => {
-          onlineTasksSnapshotRef.current = createSupabaseTasksSnapshot(
-            nextTasksForOnlineSave,
-          )
+          const nextSnapshot = new Map(onlineTasksSnapshotRef.current)
+
+          for (const taskId of affectedTaskIdsForOnlineSave) {
+            const task = nextTasksForOnlineSave.find(
+              (currentTask) => currentTask.id === taskId,
+            )
+
+            if (task) {
+              nextSnapshot.set(task.id, serializeComparableSupabaseTask(task))
+            }
+          }
+
+          onlineTasksSnapshotRef.current = nextSnapshot
           onlineSaveVersionRef.current += 1
           setSyncStatus('synced')
           setSyncMessage('Онлайн-сохранение выполнено')
