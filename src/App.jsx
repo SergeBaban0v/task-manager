@@ -594,8 +594,12 @@ function normalizeSearchText(value) {
   return String(value || '').trim().toLocaleLowerCase('ru-RU')
 }
 
+function getInitialTasksForStorageMode() {
+  return readStorageMode() === 'online' ? [] : readStoredTasks()
+}
+
 function App() {
-  const [tasks, setTasks] = useState(readStoredTasks)
+  const [tasks, setTasks] = useState(getInitialTasksForStorageMode)
   const [storageMode, setStorageMode] = useState(readStorageMode)
   const [session, setSession] = useState(null)
   const [authEmail, setAuthEmail] = useState('')
@@ -1740,18 +1744,30 @@ function App() {
               Локально
             </button>
             <button
+              className="online-mode-button"
               type="button"
               data-state={storageMode === 'online' ? 'active' : 'idle'}
               onClick={() => switchStorageMode('online')}
             >
+              {storageMode === 'online' ? (
+                <span
+                  className={`sync-dot ${syncStatus}`}
+                  aria-label={syncMessage || 'Статус онлайн-синхронизации'}
+                  tabIndex={0}
+                >
+                  <span className="sync-popover" role="status">
+                    {syncMessage || 'Онлайн-режим'}
+                  </span>
+                </span>
+              ) : null}
               Онлайн
             </button>
           </div>
 
-          <span className={`storage-status ${syncStatus}`}>
+          <span className="storage-status">
             {storageMode === 'local'
               ? 'Данные хранятся в этом браузере'
-              : syncMessage || 'Онлайн-режим'}
+              : session?.user?.email || 'Онлайн-режим'}
           </span>
 
           {storageMode === 'online' && !supabase ? (
@@ -1779,7 +1795,6 @@ function App() {
 
           {storageMode === 'online' && session ? (
             <div className="online-actions">
-              <span>{session.user.email}</span>
               <button type="button" onClick={migrateLocalTasksOnline}>
                 Перенести локальные
               </button>
@@ -1966,6 +1981,9 @@ function App() {
           <p className="empty-state">
             {searchQuery.trim()
               ? 'Ничего не найдено.'
+              : storageMode === 'online' &&
+                  (syncStatus === 'loading' || syncStatus === 'signed-out')
+                ? syncMessage || 'Загрузка онлайн-задач.'
               : 'Список пуст. Добавьте первую задачу.'}
           </p>
         )}

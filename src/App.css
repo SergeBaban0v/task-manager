@@ -162,6 +162,61 @@
   background: var(--accent);
 }
 
+.online-mode-button {
+  position: relative;
+}
+
+.sync-dot {
+  position: absolute;
+  top: 4px;
+  left: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.sync-dot.synced {
+  background: #22c55e;
+}
+
+.sync-dot.error {
+  background: var(--danger);
+}
+
+.sync-dot.loading,
+.sync-dot.saving {
+  background: #f5a524;
+}
+
+.sync-popover {
+  position: absolute;
+  left: -8px;
+  top: 16px;
+  z-index: 1100;
+  min-width: 220px;
+  max-width: min(420px, 80vw);
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: none;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.16);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: left;
+  white-space: normal;
+  user-select: text;
+}
+
+.sync-dot:hover .sync-popover,
+.sync-dot:focus .sync-popover,
+.sync-dot:focus-within .sync-popover {
+  display: block;
+}
+
 .storage-status,
 .storage-warning,
 .online-actions span {
@@ -173,13 +228,8 @@
   white-space: nowrap;
 }
 
-.storage-status.error,
 .storage-warning {
   color: var(--danger);
-}
-
-.storage-status.synced {
-  color: #047857;
 }
 
 .auth-form,
