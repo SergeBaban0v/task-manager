@@ -608,10 +608,28 @@ async function saveSupabaseTasks(tasks, userId, previousSnapshot) {
     }
   }
 
-  if (changedTasks.length > 0) {
+  const newTasks = changedTasks.filter((task) => !previousSnapshot.has(task.id))
+  const existingChangedTasks = changedTasks.filter((task) =>
+    previousSnapshot.has(task.id),
+  )
+
+  for (const task of existingChangedTasks) {
+    const { id, user_id, ...updatedTask } = taskToSupabaseRow(task, userId)
     const { error } = await supabase
       .from('tasks')
-      .upsert(changedTasks.map((task) => taskToSupabaseRow(task, userId)), {
+      .update(updatedTask)
+      .eq('user_id', user_id)
+      .eq('id', id)
+
+    if (error) {
+      throw error
+    }
+  }
+
+  if (newTasks.length > 0) {
+    const { error } = await supabase
+      .from('tasks')
+      .upsert(newTasks.map((task) => taskToSupabaseRow(task, userId)), {
         onConflict: 'user_id,id',
       })
 
@@ -1385,12 +1403,17 @@ function App() {
     setSyncStatus('saving')
     setSyncMessage('Онлайн-сохранение ожидает паузы в изменениях')
 
-    const timeoutId = window.setTimeout(
-      () => {
-        persistOnlineTasks()
-      },
-      saveImmediately ? 0 : ONLINE_SAVE_DEBOUNCE_MS,
-    )
+    if (saveImmediately) {
+      persistOnlineTasks()
+
+      return () => {
+        cancelled = true
+      }
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      persistOnlineTasks()
+    }, ONLINE_SAVE_DEBOUNCE_MS)
 
     return () => {
       cancelled = true
