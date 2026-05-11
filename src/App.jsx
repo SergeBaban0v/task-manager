@@ -20,6 +20,7 @@ const WINDOW_SIZE_INITIALIZED_KEY = 'task-manager.window.initialized'
 const INITIAL_WINDOW_MIN_WIDTH = 760
 const INITIAL_WINDOW_MAX_WIDTH = 980
 const INITIAL_WINDOW_HEIGHT = 720
+const ONLINE_SAVE_DEBOUNCE_MS = 900
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 const supabase =
@@ -380,6 +381,47 @@ function taskToSupabaseRow(task, userId) {
   }
 }
 
+function getComparableSupabaseTask(task) {
+  return {
+    id: task.id,
+    title: task.title,
+    description: task.description,
+    dependencies: getTaskDependencies(task),
+    parallelGroupId: task.parallelGroupId || null,
+    priority: getTaskPriority(task).id,
+    completed: Boolean(task.completed),
+    completedAt: task.completedAt || null,
+    createdAt: task.createdAt,
+    holdUntil: task.holdUntil || null,
+  }
+}
+
+function serializeComparableSupabaseTask(task) {
+  return JSON.stringify(getComparableSupabaseTask(task))
+}
+
+function createSupabaseTasksSnapshot(tasks) {
+  return new Map(
+    tasks.map((task) => [task.id, serializeComparableSupabaseTask(task)]),
+  )
+}
+
+function getSupabaseTaskChanges(tasks, previousSnapshot) {
+  const nextSnapshot = createSupabaseTasksSnapshot(tasks)
+  const changedTasks = tasks.filter(
+    (task) => previousSnapshot.get(task.id) !== nextSnapshot.get(task.id),
+  )
+  const removedTaskIds = [...previousSnapshot.keys()].filter(
+    (taskId) => !nextSnapshot.has(taskId),
+  )
+
+  return {
+    changedTasks,
+    removedTaskIds,
+    nextSnapshot,
+  }
+}
+
 function supabaseRowToTask(row) {
   return {
     id: row.id,
@@ -413,11 +455,15 @@ async function loadSupabaseTasks(userId) {
   return normalizeTasks((data || []).map(supabaseRowToTask))
 }
 
-async function saveSupabaseTasks(tasks, userId, previousTaskIds) {
-  const nextTaskIds = new Set(tasks.map((task) => task.id))
-  const removedTaskIds = [...previousTaskIds].filter(
-    (taskId) => !nextTaskIds.has(taskId),
+async function saveSupabaseTasks(tasks, userId, previousSnapshot) {
+  const { changedTasks, removedTaskIds, nextSnapshot } = getSupabaseTaskChanges(
+    tasks,
+    previousSnapshot,
   )
+
+  if (changedTasks.length === 0 && removedTaskIds.length === 0) {
+    return { nextSnapshot, changedCount: 0, removedCount: 0 }
+  }
 
   if (removedTaskIds.length > 0) {
     const { error } = await supabase
@@ -435,10 +481,10 @@ async function saveSupabaseTasks(tasks, userId, previousTaskIds) {
     }
   }
 
-  if (tasks.length > 0) {
+  if (changedTasks.length > 0) {
     const { error } = await supabase
       .from('tasks')
-      .upsert(tasks.map((task) => taskToSupabaseRow(task, userId)), {
+      .upsert(changedTasks.map((task) => taskToSupabaseRow(task, userId)), {
         onConflict: 'user_id,id',
       })
 
@@ -447,7 +493,11 @@ async function saveSupabaseTasks(tasks, userId, previousTaskIds) {
     }
   }
 
-  return nextTaskIds
+  return {
+    nextSnapshot,
+    changedCount: changedTasks.length,
+    removedCount: removedTaskIds.length,
+  }
 }
 
 function isTaskClosed(task) {
@@ -617,7 +667,7 @@ function App() {
   const [frozenTaskOrder, setFrozenTaskOrder] = useState(null)
   const holdRepeatRef = useRef(null)
   const onlineLoadedRef = useRef(false)
-  const onlineTaskIdsRef = useRef(new Set())
+  const onlineTasksSnapshotRef = useRef(new Map())
   const taskItemRefs = useRef(new Map())
   const taskItemRects = useRef(new Map())
 
@@ -818,7 +868,7 @@ function App() {
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession)
       onlineLoadedRef.current = false
-      onlineTaskIdsRef.current = new Set()
+      onlineTasksSnapshotRef.current = new Map()
     })
 
     return () => {
@@ -832,7 +882,7 @@ function App() {
 
     if (storageMode === 'local') {
       onlineLoadedRef.current = false
-      onlineTaskIdsRef.current = new Set()
+      onlineTasksSnapshotRef.current = new Map()
     }
   }, [storageMode])
 
@@ -851,7 +901,7 @@ function App() {
 
     if (!session) {
       onlineLoadedRef.current = false
-      onlineTaskIdsRef.current = new Set()
+      onlineTasksSnapshotRef.current = new Map()
       queueMicrotask(() => {
         setSyncStatus('signed-out')
         setSyncMessage('Войдите, чтобы загрузить онлайн-задачи')
@@ -872,7 +922,7 @@ function App() {
           return
         }
 
-        onlineTaskIdsRef.current = new Set(onlineTasks.map((task) => task.id))
+        onlineTasksSnapshotRef.current = createSupabaseTasksSnapshot(onlineTasks)
         onlineLoadedRef.current = true
         setTasks(onlineTasks)
         setSyncStatus('synced')
@@ -907,6 +957,18 @@ function App() {
       return
     }
 
+    const pendingChanges = getSupabaseTaskChanges(
+      tasks,
+      onlineTasksSnapshotRef.current,
+    )
+
+    if (
+      pendingChanges.changedTasks.length === 0 &&
+      pendingChanges.removedTaskIds.length === 0
+    ) {
+      return
+    }
+
     let cancelled = false
 
     async function persistOnlineTasks() {
@@ -914,14 +976,14 @@ function App() {
         setSyncStatus('saving')
         setSyncMessage('Сохранение онлайн')
 
-        const nextTaskIds = await saveSupabaseTasks(
+        const saveResult = await saveSupabaseTasks(
           tasks,
           session.user.id,
-          onlineTaskIdsRef.current,
+          onlineTasksSnapshotRef.current,
         )
 
         if (!cancelled) {
-          onlineTaskIdsRef.current = nextTaskIds
+          onlineTasksSnapshotRef.current = saveResult.nextSnapshot
           setSyncStatus('synced')
           setSyncMessage('Онлайн-сохранение выполнено')
         }
@@ -933,10 +995,16 @@ function App() {
       }
     }
 
-    persistOnlineTasks()
+    setSyncStatus('saving')
+    setSyncMessage('Онлайн-сохранение ожидает паузы в изменениях')
+
+    const timeoutId = window.setTimeout(() => {
+      persistOnlineTasks()
+    }, ONLINE_SAVE_DEBOUNCE_MS)
 
     return () => {
       cancelled = true
+      window.clearTimeout(timeoutId)
     }
   }, [tasks, storageMode, session])
 
@@ -1074,7 +1142,7 @@ function App() {
     setDetailEditor(null)
     setDeleteConfirmation(null)
     onlineLoadedRef.current = false
-    onlineTaskIdsRef.current = new Set()
+    onlineTasksSnapshotRef.current = new Map()
 
     if (nextStorageMode === 'local') {
       setTasks(readStoredTasks())
@@ -1123,7 +1191,7 @@ function App() {
     await supabase.auth.signOut()
     setSession(null)
     onlineLoadedRef.current = false
-    onlineTaskIdsRef.current = new Set()
+    onlineTasksSnapshotRef.current = new Map()
     setTasks(readStoredTasks())
     setStorageMode('local')
   }
@@ -1138,13 +1206,13 @@ function App() {
       setSyncMessage('Переносим локальные задачи в онлайн')
 
       const localTasks = readStoredTasks()
-      const nextTaskIds = await saveSupabaseTasks(
+      const saveResult = await saveSupabaseTasks(
         localTasks,
         session.user.id,
-        onlineTaskIdsRef.current,
+        onlineTasksSnapshotRef.current,
       )
 
-      onlineTaskIdsRef.current = nextTaskIds
+      onlineTasksSnapshotRef.current = saveResult.nextSnapshot
       onlineLoadedRef.current = true
       setTasks(localTasks)
       setSyncStatus('synced')
