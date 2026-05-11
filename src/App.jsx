@@ -455,6 +455,33 @@ function getPomodoroProgress(pomodoroState, currentTime) {
   )
 }
 
+function getPomodoroFillClipPath(progress) {
+  if (progress >= 0.995) {
+    return 'none'
+  }
+
+  if (progress <= 0) {
+    return 'polygon(50% 54%, 50% -38%, 50% -38%)'
+  }
+
+  const centerX = 50
+  const centerY = 54
+  const radius = 92
+  const sweep = progress * 360
+  const steps = Math.max(2, Math.ceil(sweep / 8))
+  const points = [`${centerX}% ${centerY}%`]
+
+  for (let index = 0; index <= steps; index += 1) {
+    const angle = (-90 + (sweep * index) / steps) * (Math.PI / 180)
+    const x = centerX + radius * Math.cos(angle)
+    const y = centerY + radius * Math.sin(angle)
+
+    points.push(`${x.toFixed(2)}% ${y.toFixed(2)}%`)
+  }
+
+  return `polygon(${points.join(', ')})`
+}
+
 function taskToSupabaseRow(task, userId) {
   return {
     id: task.id,
@@ -753,6 +780,7 @@ function App() {
   const [holdEditor, setHoldEditor] = useState(null)
   const [detailEditor, setDetailEditor] = useState(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState(null)
+  const [pomodoroHelpOpen, setPomodoroHelpOpen] = useState(false)
   const [priorityMenuTaskId, setPriorityMenuTaskId] = useState(null)
   const [priorityMenuPosition, setPriorityMenuPosition] = useState(null)
   const [pomodoroMenuPosition, setPomodoroMenuPosition] = useState(null)
@@ -1003,13 +1031,15 @@ function App() {
   }, [pomodoroMenuPosition])
 
   useEffect(() => {
-    if (!detailEditor && !deleteConfirmation) {
+    if (!detailEditor && !deleteConfirmation && !pomodoroHelpOpen) {
       return undefined
     }
 
     function closeOnEscape(event) {
       if (event.key === 'Escape') {
-        if (deleteConfirmation) {
+        if (pomodoroHelpOpen) {
+          setPomodoroHelpOpen(false)
+        } else if (deleteConfirmation) {
           closeDeleteConfirmation()
         } else {
           closeDetailEditor()
@@ -1020,7 +1050,7 @@ function App() {
     document.addEventListener('keydown', closeOnEscape)
 
     return () => document.removeEventListener('keydown', closeOnEscape)
-  }, [detailEditor, deleteConfirmation])
+  }, [detailEditor, deleteConfirmation, pomodoroHelpOpen])
 
   useEffect(() => {
     writePomodoroState(pomodoro)
@@ -2058,10 +2088,14 @@ function App() {
     setPomodoro((current) => ({
       ...current,
       selectedTaskId: task.id,
-      mode: 'idle',
-      startedAt: null,
-      finishedWorkTaskId: null,
+      finishedWorkTaskId:
+        current.mode === 'work' ? current.finishedWorkTaskId : null,
     }))
+  }
+
+  function openPomodoroHelp() {
+    closePomodoroMenu()
+    setPomodoroHelpOpen(true)
   }
 
   function openDetailEditor(event, task) {
@@ -2153,6 +2187,7 @@ function App() {
     ? getTaskPriority(priorityMenuTask)
     : null
   const pomodoroProgress = getPomodoroProgress(pomodoro, now)
+  const pomodoroFillClipPath = getPomodoroFillClipPath(pomodoroProgress)
   const pomodoroImage =
     pomodoro.mode === 'break' ? pomodoroBreakImage : pomodoroWorkImage
   const pomodoroMinutes =
@@ -2218,6 +2253,7 @@ function App() {
             className={[
               'pomodoro-widget',
               pomodoro.enabled ? '' : 'disabled',
+              pomodoro.mode === 'break' ? 'break' : '',
               pomodoro.mode === 'work-done' ? 'done' : '',
             ]
               .filter(Boolean)
@@ -2227,6 +2263,8 @@ function App() {
             onContextMenu={handlePomodoroContextMenu}
             style={{
               '--pomodoro-progress': `${pomodoroProgress * 360}deg`,
+              '--pomodoro-brightness': 0.42 + pomodoroProgress * 0.9,
+              '--pomodoro-saturation': 0.72 + pomodoroProgress * 0.55,
             }}
             aria-label={
               pomodoro.enabled
@@ -2236,7 +2274,16 @@ function App() {
             title="Левый клик - старт или перерыв. Правый клик - настройки."
           >
             <span className="pomodoro-tomato">
-              <img src={pomodoroImage} alt="" />
+              <img className="pomodoro-tomato-dim" src={pomodoroImage} alt="" />
+              <img
+                className="pomodoro-tomato-fill"
+                src={pomodoroImage}
+                alt=""
+                style={{
+                  clipPath: pomodoroFillClipPath,
+                  WebkitClipPath: pomodoroFillClipPath,
+                }}
+              />
             </span>
             {pomodoro.enabled ? (
               <span className="pomodoro-time">{pomodoroTimeLabel}</span>
@@ -2603,6 +2650,13 @@ function App() {
                 />
                 <span>Включить Pomodoro</span>
               </label>
+              <button
+                className="pomodoro-help-button"
+                type="button"
+                onClick={openPomodoroHelp}
+              >
+                Краткая справка
+              </button>
             </form>,
             document.body,
           )
@@ -2656,6 +2710,49 @@ function App() {
               <button type="submit">Удалить</button>
             </div>
           </form>
+        </div>
+      ) : null}
+
+      {pomodoroHelpOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setPomodoroHelpOpen(false)
+            }
+          }}
+        >
+          <section className="pomodoro-help-dialog" role="dialog" aria-modal="true">
+            <button
+              className="dialog-close-button"
+              type="button"
+              onClick={() => setPomodoroHelpOpen(false)}
+              aria-label="Закрыть справку"
+              title="Закрыть"
+            >
+              ×
+            </button>
+            <h2>Pomodoro</h2>
+            <p>
+              Pomodoro - это способ работать короткими сфокусированными
+              отрезками. Обычно один цикл состоит из 25 минут работы и 5 минут
+              отдыха. В течение рабочего отрезка важно заниматься одной
+              конкретной задачей и не переключаться без необходимости.
+            </p>
+            <p>
+              Смысл техники - снизить усталость от постоянного выбора, держать
+              понятный ритм и видеть реальный прогресс. Если задача закончилась
+              раньше, можно перенести маленький помидор на следующую задачу, но
+              рабочий цикл при этом продолжается.
+            </p>
+            <p>
+              Когда рабочее время закончится, большой помидор начнет мигать и
+              подаст сигнал. После клика начинается короткий отдых. Длительность
+              работы и отдыха можно настроить правым кликом по большому
+              помидору.
+            </p>
+          </section>
         </div>
       ) : null}
 

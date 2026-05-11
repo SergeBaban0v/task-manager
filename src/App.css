@@ -66,10 +66,10 @@
 
 .task-stats {
   align-self: center;
-  display: flex;
+  display: grid;
   gap: 8px;
-  flex-wrap: wrap;
   justify-content: flex-end;
+  justify-items: end;
 }
 
 .task-stats span,
@@ -145,45 +145,60 @@
 
 .pomodoro-tomato {
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  bottom: -7px;
+  height: 76px;
   display: grid;
   place-items: center;
 }
 
-.pomodoro-tomato::after {
-  content: "";
-  position: absolute;
-  inset: 8px;
-  border-radius: 999px;
-  background: conic-gradient(
-    from -90deg,
-    rgba(255, 255, 255, 0.48) 0deg var(--pomodoro-progress, 0deg),
-    transparent var(--pomodoro-progress, 0deg) 360deg
-  );
-  mix-blend-mode: screen;
-  pointer-events: none;
-}
-
 .pomodoro-widget img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: contain;
-  filter: drop-shadow(0 8px 8px rgba(15, 23, 42, 0.16));
+}
+
+.pomodoro-tomato-dim {
+  filter:
+    brightness(0.42)
+    saturate(0.72)
+    drop-shadow(0 8px 8px rgba(15, 23, 42, 0.16));
+}
+
+.pomodoro-tomato-fill {
+  filter:
+    brightness(1)
+    saturate(1)
+    drop-shadow(0 8px 8px rgba(15, 23, 42, 0.16));
+}
+
+.pomodoro-widget.done .pomodoro-tomato-fill {
+  clip-path: none;
 }
 
 .pomodoro-time {
-  position: relative;
-  z-index: 1;
+  position: absolute;
+  z-index: 2;
+  top: -2px;
+  left: 50%;
+  transform: translateX(-50%);
   min-width: 48px;
-  padding: 3px 6px;
-  border-radius: 999px;
-  color: #fff;
-  background: rgba(15, 23, 42, 0.42);
-  font-size: 13px;
+  padding: 0;
+  color: #d1242f;
+  background: transparent;
+  font-size: 15px;
   font-weight: 800;
-  line-height: 1;
+  line-height: 1.1;
   text-align: center;
+  text-shadow: 0 1px 0 #fff, 0 2px 5px rgba(255, 255, 255, 0.95);
   font-variant-numeric: tabular-nums;
+}
+
+.pomodoro-widget.break .pomodoro-time {
+  color: #3f7f0d;
 }
 
 .pomodoro-menu {
@@ -231,6 +246,25 @@
   width: 18px;
   height: 18px;
   accent-color: var(--accent);
+}
+
+.pomodoro-help-button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pomodoro-help-button:hover {
+  border-color: #c7d2fe;
+  color: var(--accent);
+  background: #eef2ff;
 }
 
 @keyframes pomodoro-blink {
@@ -829,6 +863,7 @@
 
 .hold-dialog,
 .confirm-dialog,
+.pomodoro-help-dialog,
 .detail-dialog {
   position: relative;
   width: min(360px, 100%);
@@ -843,6 +878,11 @@
 
 .confirm-dialog {
   gap: 16px;
+}
+
+.pomodoro-help-dialog {
+  width: min(520px, 100%);
+  padding-right: 48px;
 }
 
 .detail-dialog {
@@ -877,6 +917,7 @@
 
 .hold-dialog h2,
 .confirm-dialog h2,
+.pomodoro-help-dialog h2,
 .detail-dialog h2 {
   margin: 0;
   color: var(--text-strong);
@@ -884,10 +925,15 @@
   line-height: 1.2;
 }
 
-.confirm-dialog p {
+.confirm-dialog p,
+.pomodoro-help-dialog p {
   margin: 0;
   color: var(--text);
   overflow-wrap: anywhere;
+}
+
+.pomodoro-help-dialog p {
+  line-height: 1.5;
 }
 
 .hold-dialog label,
