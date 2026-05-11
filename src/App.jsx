@@ -800,6 +800,7 @@ function App() {
   const pomodoroSoundEnabledRef = useRef(pomodoro.soundEnabled)
   const onlineLoadedRef = useRef(false)
   const onlineTasksSnapshotRef = useRef(new Map())
+  const onlineSaveImmediatelyRef = useRef(false)
   const taskItemRefs = useRef(new Map())
   const taskItemRects = useRef(new Map())
 
@@ -1326,6 +1327,7 @@ function App() {
 
   useEffect(() => {
     if (storageMode === 'local') {
+      onlineSaveImmediatelyRef.current = false
       writeStoredTasks(tasks)
       return
     }
@@ -1348,10 +1350,13 @@ function App() {
       pendingChanges.changedTasks.length === 0 &&
       pendingChanges.removedTaskIds.length === 0
     ) {
+      onlineSaveImmediatelyRef.current = false
       return
     }
 
     let cancelled = false
+    const saveImmediately = onlineSaveImmediatelyRef.current
+    onlineSaveImmediatelyRef.current = false
 
     async function persistOnlineTasks() {
       try {
@@ -1380,9 +1385,12 @@ function App() {
     setSyncStatus('saving')
     setSyncMessage('Онлайн-сохранение ожидает паузы в изменениях')
 
-    const timeoutId = window.setTimeout(() => {
-      persistOnlineTasks()
-    }, ONLINE_SAVE_DEBOUNCE_MS)
+    const timeoutId = window.setTimeout(
+      () => {
+        persistOnlineTasks()
+      },
+      saveImmediately ? 0 : ONLINE_SAVE_DEBOUNCE_MS,
+    )
 
     return () => {
       cancelled = true
@@ -1667,6 +1675,7 @@ function App() {
   }
 
   function toggleTask(taskId) {
+    onlineSaveImmediatelyRef.current = true
     setTasks((currentTasks) =>
       normalizeParallelGroups(
         currentTasks.map((task) => {
