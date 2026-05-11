@@ -4,6 +4,7 @@ create table if not exists public.tasks (
   title text not null,
   description text not null default '',
   dependencies text[] not null default '{}',
+  parallel_group_id text,
   priority text not null default 'medium',
   completed boolean not null default false,
   completed_at bigint,
@@ -20,6 +21,9 @@ alter table public.tasks
 
 alter table public.tasks
   add column if not exists deleted_at bigint;
+
+alter table public.tasks
+  add column if not exists parallel_group_id text;
 
 alter table public.tasks enable row level security;
 

@@ -124,6 +124,7 @@ function getInitialDemoTasks(currentTime = Date.now()) {
 const RELATION_TYPES = [
   { id: 'depends-on', label: 'зависит от' },
   { id: 'blocks', label: 'блокирует' },
+  { id: 'parallel', label: 'выполняется одновременно' },
 ]
 
 function getTaskPriority(task) {
@@ -279,6 +280,11 @@ function normalizeTasks(rawTasks, currentTime = Date.now()) {
       dependencies: Array.isArray(safeTask.dependencies)
         ? [...new Set(safeTask.dependencies.filter(Boolean).map(String))]
         : [],
+      parallelGroupId:
+        typeof safeTask.parallelGroupId === 'string' &&
+        safeTask.parallelGroupId.trim()
+          ? safeTask.parallelGroupId
+          : null,
       priority,
       completed,
       completedAt,
@@ -287,11 +293,26 @@ function normalizeTasks(rawTasks, currentTime = Date.now()) {
     }
   })
 
+  const groupCounts = normalizedTasks.reduce((counts, task) => {
+    if (task.parallelGroupId) {
+      counts.set(
+        task.parallelGroupId,
+        (counts.get(task.parallelGroupId) || 0) + 1,
+      )
+    }
+
+    return counts
+  }, new Map())
+
   return normalizedTasks.map((task) => ({
     ...task,
     dependencies: task.dependencies.filter(
       (dependencyId) => dependencyId !== task.id && knownIds.has(dependencyId),
     ),
+    parallelGroupId:
+      task.parallelGroupId && groupCounts.get(task.parallelGroupId) > 1
+        ? task.parallelGroupId
+        : null,
   }))
 }
 
@@ -347,6 +368,7 @@ function taskToSupabaseRow(task, userId) {
     title: task.title,
     description: task.description,
     dependencies: getTaskDependencies(task),
+    parallel_group_id: task.parallelGroupId,
     priority: getTaskPriority(task).id,
     completed: task.completed,
     completed_at: task.completedAt,
@@ -364,6 +386,7 @@ function supabaseRowToTask(row) {
     title: row.title,
     description: row.description,
     dependencies: row.dependencies,
+    parallelGroupId: row.parallel_group_id,
     priority: row.priority,
     completed: row.completed,
     completedAt: row.completed_at,
@@ -378,7 +401,7 @@ async function loadSupabaseTasks(userId) {
   const { data, error } = await supabase
     .from('tasks')
     .select(
-      'id,title,description,dependencies,priority,completed,completed_at,created_at,hold_until,deleted,deleted_at',
+      'id,title,description,dependencies,parallel_group_id,priority,completed,completed_at,created_at,hold_until,deleted,deleted_at',
     )
     .eq('user_id', userId)
     .eq('deleted', false)
@@ -433,6 +456,90 @@ function isTaskClosed(task) {
 
 function getTaskDependencies(task) {
   return Array.isArray(task.dependencies) ? task.dependencies : []
+}
+
+function getTaskParallelGroupId(task) {
+  return task &&
+    typeof task.parallelGroupId === 'string' &&
+    task.parallelGroupId
+    ? task.parallelGroupId
+    : null
+}
+
+function getParallelGroupTasks(task, allTasks) {
+  const parallelGroupId = getTaskParallelGroupId(task)
+
+  if (!parallelGroupId) {
+    return [task]
+  }
+
+  const groupTasks = allTasks.filter(
+    (relatedTask) => getTaskParallelGroupId(relatedTask) === parallelGroupId,
+  )
+
+  return groupTasks.length > 1 ? groupTasks : [task]
+}
+
+function compareParallelGroupTasks(firstTask, secondTask, allTasks) {
+  const priorityDiff =
+    getDisplayedTaskPriority(firstTask, allTasks).rank -
+    getDisplayedTaskPriority(secondTask, allTasks).rank
+
+  if (priorityDiff) {
+    return priorityDiff
+  }
+
+  return firstTask.title.localeCompare(secondTask.title, 'ru-RU')
+}
+
+function getOrderedParallelGroupTasks(task, allTasks) {
+  return [...getParallelGroupTasks(task, allTasks)].sort((firstTask, secondTask) =>
+    compareParallelGroupTasks(firstTask, secondTask, allTasks),
+  )
+}
+
+function normalizeParallelGroups(tasks) {
+  const groupCounts = tasks.reduce((counts, task) => {
+    if (task.parallelGroupId) {
+      counts.set(task.parallelGroupId, (counts.get(task.parallelGroupId) || 0) + 1)
+    }
+
+    return counts
+  }, new Map())
+
+  return tasks.map((task) =>
+    task.parallelGroupId && groupCounts.get(task.parallelGroupId) < 2
+      ? { ...task, parallelGroupId: null }
+      : task,
+  )
+}
+
+function orderTasksWithParallelGroups(sortedTasks, allTasks) {
+  const sortedTaskById = new Map(sortedTasks.map((task) => [task.id, task]))
+  const seenGroupIds = new Set()
+  const orderedTasks = []
+
+  for (const task of sortedTasks) {
+    const parallelGroupId = getTaskParallelGroupId(task)
+
+    if (!parallelGroupId) {
+      orderedTasks.push(task)
+      continue
+    }
+
+    if (seenGroupIds.has(parallelGroupId)) {
+      continue
+    }
+
+    seenGroupIds.add(parallelGroupId)
+    orderedTasks.push(
+      ...getOrderedParallelGroupTasks(task, allTasks).filter((groupTask) =>
+        sortedTaskById.has(groupTask.id),
+      ),
+    )
+  }
+
+  return orderedTasks
 }
 
 function getOpenDependencyTasks(task, taskById) {
@@ -850,11 +957,38 @@ function App() {
             getTaskDependencies(relatedTask).includes(task.id),
           )
           .map((relatedTask) => relatedTask.title),
+        ...getParallelGroupTasks(task, tasks)
+          .filter((relatedTask) => relatedTask.id !== task.id)
+          .map((relatedTask) => relatedTask.title),
       ]
 
       return normalizeSearchText(
         [task.title, task.description, ...relatedTaskTitles].join(' '),
       ).includes(normalizedSearchQuery)
+    }
+
+    function getOpenParallelGroupTasks(task) {
+      return getParallelGroupTasks(task, tasks).filter(
+        (groupTask) => !isTaskClosed(groupTask),
+      )
+    }
+
+    function isParallelGroupBlocked(task) {
+      return getOpenParallelGroupTasks(task).some((groupTask) =>
+        isTaskBlockedByDependency(groupTask, taskById),
+      )
+    }
+
+    function getParallelGroupHoldUntil(task) {
+      const holdUntil = Math.max(
+        ...getOpenParallelGroupTasks(task).map((groupTask) =>
+          groupTask.holdUntil && groupTask.holdUntil > now
+            ? groupTask.holdUntil
+            : 0,
+        ),
+      )
+
+      return holdUntil > 0 ? holdUntil : null
     }
 
     for (const task of tasks) {
@@ -864,9 +998,9 @@ function App() {
 
       if (isTaskClosed(task)) {
         closedTasks.push(task)
-      } else if (isTaskBlockedByDependency(task, taskById)) {
+      } else if (isParallelGroupBlocked(task)) {
         dependencyHoldTasks.push(task)
-      } else if (isTaskOnTimerHold(task, now)) {
+      } else if (getParallelGroupHoldUntil(task)) {
         timerHoldTasks.push(task)
       } else {
         activeTasks.push(task)
@@ -886,9 +1020,12 @@ function App() {
 
       return priorityDiff || secondTask.createdAt - firstTask.createdAt
     })
-    timerHoldTasks.sort(
-      (firstTask, secondTask) => firstTask.holdUntil - secondTask.holdUntil,
-    )
+    timerHoldTasks.sort((firstTask, secondTask) => {
+      const firstHoldUntil = getParallelGroupHoldUntil(firstTask) || 0
+      const secondHoldUntil = getParallelGroupHoldUntil(secondTask) || 0
+
+      return firstHoldUntil - secondHoldUntil
+    })
     closedTasks.sort(
       (firstTask, secondTask) =>
         (secondTask.completedAt || 0) - (firstTask.completedAt || 0),
@@ -896,7 +1033,11 @@ function App() {
 
     const openTasks = [...activeTasks, ...dependencyHoldTasks, ...timerHoldTasks]
 
-    const sortedTasks = showClosedTasks ? [...openTasks, ...closedTasks] : openTasks
+    const groupedOpenTasks = orderTasksWithParallelGroups(openTasks, tasks)
+    const groupedClosedTasks = orderTasksWithParallelGroups(closedTasks, tasks)
+    const sortedTasks = showClosedTasks
+      ? [...groupedOpenTasks, ...groupedClosedTasks]
+      : groupedOpenTasks
 
     if (!frozenTaskOrder) {
       return sortedTasks
@@ -1059,6 +1200,7 @@ function App() {
         title,
         description: '',
         dependencies: [],
+        parallelGroupId: null,
         priority: DEFAULT_PRIORITY,
         completed: false,
         completedAt: null,
@@ -1072,63 +1214,114 @@ function App() {
 
   function toggleTask(taskId) {
     setTasks((currentTasks) =>
-      currentTasks.map((task) => {
-        if (task.id !== taskId) {
-          return task
-        }
+      normalizeParallelGroups(
+        currentTasks.map((task) => {
+          const targetTask = currentTasks.find(
+            (currentTask) => currentTask.id === taskId,
+          )
+          const affectedTaskIds = new Set(
+            targetTask
+              ? getParallelGroupTasks(targetTask, currentTasks).map(
+                  (groupTask) => groupTask.id,
+                )
+              : [taskId],
+          )
 
-        if (task.completed) {
-          return { ...task, completed: false, completedAt: null }
-        }
+          if (!affectedTaskIds.has(task.id)) {
+            return task
+          }
 
-        return {
-          ...task,
-          completed: true,
-          completedAt: Date.now(),
-          holdUntil: null,
-        }
-      }),
+          if (targetTask?.completed) {
+            return { ...task, completed: false, completedAt: null }
+          }
+
+          return {
+            ...task,
+            completed: true,
+            completedAt: Date.now(),
+            holdUntil: null,
+          }
+        }),
+      ),
     )
   }
 
   function addHoldStep(taskId) {
-    setTasks((currentTasks) =>
-      currentTasks.map((task) => {
-        if (task.id !== taskId || task.completed) {
+    setTasks((currentTasks) => {
+      const targetTask = currentTasks.find((task) => task.id === taskId)
+      const affectedTaskIds = new Set(
+        targetTask
+          ? getParallelGroupTasks(targetTask, currentTasks).map((task) => task.id)
+          : [taskId],
+      )
+      const nextHoldUntil =
+        Math.max(
+          ...currentTasks
+            .filter((task) => affectedTaskIds.has(task.id))
+            .map((task) => task.holdUntil || 0),
+          Date.now(),
+        ) + HOLD_STEP_MS
+
+      return currentTasks.map((task) => {
+        if (!affectedTaskIds.has(task.id) || task.completed) {
           return task
         }
 
         return {
           ...task,
-          holdUntil: Math.max(task.holdUntil || 0, Date.now()) + HOLD_STEP_MS,
+          holdUntil: nextHoldUntil,
         }
-      }),
-    )
+      })
+    })
   }
 
   function reduceHoldStep(taskId) {
-    setTasks((currentTasks) =>
-      currentTasks.map((task) => {
-        if (task.id !== taskId || task.completed || !task.holdUntil) {
+    setTasks((currentTasks) => {
+      const targetTask = currentTasks.find((task) => task.id === taskId)
+      const affectedTaskIds = new Set(
+        targetTask
+          ? getParallelGroupTasks(targetTask, currentTasks).map((task) => task.id)
+          : [taskId],
+      )
+      const currentHoldUntil = Math.max(
+        ...currentTasks
+          .filter((task) => affectedTaskIds.has(task.id))
+          .map((task) => task.holdUntil || 0),
+      )
+      const nextHoldUntil = currentHoldUntil - HOLD_STEP_MS
+
+      return currentTasks.map((task) => {
+        if (
+          !affectedTaskIds.has(task.id) ||
+          task.completed ||
+          !currentHoldUntil
+        ) {
           return task
         }
-
-        const nextHoldUntil = task.holdUntil - HOLD_STEP_MS
 
         return {
           ...task,
           holdUntil: nextHoldUntil > Date.now() ? nextHoldUntil : null,
         }
-      }),
-    )
+      })
+    })
   }
 
   function updateTaskHold(taskId, holdUntil) {
-    setTasks((currentTasks) =>
-      currentTasks.map((task) =>
-        task.id === taskId && !task.completed ? { ...task, holdUntil } : task,
-      ),
-    )
+    setTasks((currentTasks) => {
+      const targetTask = currentTasks.find((task) => task.id === taskId)
+      const affectedTaskIds = new Set(
+        targetTask
+          ? getParallelGroupTasks(targetTask, currentTasks).map((task) => task.id)
+          : [taskId],
+      )
+
+      return currentTasks.map((task) =>
+        affectedTaskIds.has(task.id) && !task.completed
+          ? { ...task, holdUntil }
+          : task,
+      )
+    })
   }
 
   function updateTaskPriority(taskId, priority) {
@@ -1141,20 +1334,52 @@ function App() {
   }
 
   function applyDetailRelationships(nextRelationships) {
-    setTasks((currentTasks) =>
-      currentTasks.map((task) => {
+    setTasks((currentTasks) => {
+      const selectedParallelTaskIds = new Set(
+        nextRelationships
+          .filter((relation) => relation.type === 'parallel')
+          .map((relation) => relation.taskId),
+      )
+      const editedTask = currentTasks.find(
+        (task) => task.id === detailEditor.taskId,
+      )
+      const currentParallelGroupId = getTaskParallelGroupId(editedTask)
+      const selectedParallelGroupIds = new Set(
+        currentTasks
+          .filter(
+            (task) =>
+              selectedParallelTaskIds.has(task.id) &&
+              getTaskParallelGroupId(task),
+          )
+          .map((task) => getTaskParallelGroupId(task)),
+      )
+      const nextParallelGroupId =
+        selectedParallelTaskIds.size > 0
+          ? currentParallelGroupId ||
+            selectedParallelGroupIds.values().next().value ||
+            `parallel-${getStableTaskId()}`
+          : null
+
+      return normalizeParallelGroups(currentTasks.map((task) => {
         if (task.id === detailEditor.taskId && !task.completed) {
           return {
             ...task,
             dependencies: nextRelationships
               .filter((relation) => relation.type === 'depends-on')
               .map((relation) => relation.taskId),
+            parallelGroupId: nextParallelGroupId,
           }
         }
 
         if (task.completed) {
           return task
         }
+
+        const taskParallelGroupId = getTaskParallelGroupId(task)
+        const belongsToSelectedParallelGroup =
+          taskParallelGroupId && selectedParallelGroupIds.has(taskParallelGroupId)
+        const belongsToCurrentParallelGroup =
+          taskParallelGroupId && taskParallelGroupId === currentParallelGroupId
 
         const taskDependencies = getTaskDependencies(task).filter(
           (dependencyId) => dependencyId !== detailEditor.taskId,
@@ -1169,9 +1394,15 @@ function App() {
           dependencies: isBlockedByEditedTask
             ? [...taskDependencies, detailEditor.taskId]
             : taskDependencies,
+          parallelGroupId:
+            selectedParallelTaskIds.has(task.id) || belongsToSelectedParallelGroup
+              ? nextParallelGroupId
+              : belongsToCurrentParallelGroup
+                ? null
+                : task.parallelGroupId,
         }
-      }),
-    )
+      }))
+    })
   }
 
   function updateDetailTaskField(field, value) {
@@ -1211,14 +1442,16 @@ function App() {
     const taskId = deleteConfirmation.taskId
 
     setTasks((currentTasks) =>
-      currentTasks
-        .filter((task) => task.id !== taskId)
-        .map((task) => ({
+      normalizeParallelGroups(
+        currentTasks
+          .filter((task) => task.id !== taskId)
+          .map((task) => ({
           ...task,
           dependencies: getTaskDependencies(task).filter(
             (dependencyId) => dependencyId !== taskId,
           ),
-        })),
+          })),
+      ),
     )
     closeDeleteConfirmation()
   }
@@ -1239,12 +1472,31 @@ function App() {
       return
     }
 
+    const selectedRelationTask = taskById.get(detailEditor.selectedLinkedTaskId)
+    const addedRelations =
+      detailEditor.selectedRelationType === 'parallel' && selectedRelationTask
+        ? getParallelGroupTasks(selectedRelationTask, tasks)
+            .filter((task) => task.id !== detailEditor.taskId)
+            .map((task) => ({
+              type: 'parallel',
+              taskId: task.id,
+            }))
+        : [
+            {
+              type: detailEditor.selectedRelationType,
+              taskId: detailEditor.selectedLinkedTaskId,
+            },
+          ]
     const nextRelationships = [
       ...detailEditor.relationships,
-      {
-        type: detailEditor.selectedRelationType,
-        taskId: detailEditor.selectedLinkedTaskId,
-      },
+      ...addedRelations.filter(
+        (addedRelation) =>
+          !detailEditor.relationships.some(
+            (relation) =>
+              relation.type === addedRelation.type &&
+              relation.taskId === addedRelation.taskId,
+          ),
+      ),
     ]
 
     applyDetailRelationships(nextRelationships)
@@ -1378,6 +1630,12 @@ function App() {
             type: 'blocks',
             taskId: relatedTask.id,
           })),
+        ...getParallelGroupTasks(task, tasks)
+          .filter((relatedTask) => relatedTask.id !== task.id)
+          .map((relatedTask) => ({
+            type: 'parallel',
+            taskId: relatedTask.id,
+          })),
       ],
       selectedRelationType: 'depends-on',
       selectedLinkedTaskId: '',
@@ -1385,7 +1643,13 @@ function App() {
   }
 
   function getDependencyReason(task) {
-    const openDependencies = getOpenDependencyTasks(task, taskById)
+    const openDependencies = [
+      ...new Map(
+        getParallelGroupTasks(task, tasks)
+          .flatMap((groupTask) => getOpenDependencyTasks(groupTask, taskById))
+          .map((dependencyTask) => [dependencyTask.id, dependencyTask]),
+      ).values(),
+    ]
     const firstDependency = openDependencies[0]
 
     if (!firstDependency) {
@@ -1546,7 +1810,25 @@ function App() {
             {visibleTasks.map((task) => {
               const dependencyReason = getDependencyReason(task)
               const dependencyHold = Boolean(dependencyReason)
-              const onHold = isTaskOnHold(task, now, taskById)
+              const parallelGroupTasks = getParallelGroupTasks(task, tasks)
+              const orderedParallelGroupTasks = getOrderedParallelGroupTasks(
+                task,
+                tasks,
+              )
+              const parallelGroupIndex = orderedParallelGroupTasks.findIndex(
+                (groupTask) => groupTask.id === task.id,
+              )
+              const parallelGroupHoldUntil = Math.max(
+                ...parallelGroupTasks.map((groupTask) =>
+                  groupTask.holdUntil && groupTask.holdUntil > now
+                    ? groupTask.holdUntil
+                    : 0,
+                ),
+              )
+              const onHold =
+                dependencyHold ||
+                Boolean(parallelGroupHoldUntil) ||
+                isTaskOnHold(task, now, taskById)
               const closed = isTaskClosed(task)
               const closedAt = task.completedAt || task.createdAt
               const displayedPriority = getDisplayedTaskPriority(task, tasks)
@@ -1557,6 +1839,14 @@ function App() {
                 dependencyHold ? 'dependency-hold' : '',
                 onHold ? 'on-hold' : '',
                 priorityMenuTaskId === task.id ? 'priority-menu-open' : '',
+                parallelGroupTasks.length > 1 ? 'parallel-grouped' : '',
+                parallelGroupTasks.length > 1 && parallelGroupIndex === 0
+                  ? 'parallel-first'
+                  : '',
+                parallelGroupTasks.length > 1 &&
+                parallelGroupIndex === parallelGroupTasks.length - 1
+                  ? 'parallel-last'
+                  : '',
               ]
                 .filter(Boolean)
                 .join(' ')
@@ -1645,7 +1935,10 @@ function App() {
                       aria-label={`Изменить время холда задачи: ${task.title}`}
                       title="Левый клик - выбрать срок. Правый клик - уменьшить холд на 15 минут."
                     >
-                      {formatRemainingTime(task.holdUntil, now)}
+                      {formatRemainingTime(
+                        parallelGroupHoldUntil || task.holdUntil,
+                        now,
+                      )}
                     </button>
                   ) : null}
                   {closed ? (

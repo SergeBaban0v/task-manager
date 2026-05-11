@@ -297,8 +297,56 @@
   z-index: 30;
 }
 
+.task-item.parallel-grouped {
+  border-color: #c7d2fe;
+}
+
+.task-item.parallel-grouped:not(.parallel-first) {
+  margin-top: -10px;
+  border-top-color: transparent;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.task-item.parallel-grouped:not(.parallel-last) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.task-item.parallel-grouped::before {
+  content: "";
+  position: absolute;
+  left: 25%;
+  top: -13px;
+  width: 10px;
+  height: 26px;
+  pointer-events: none;
+  z-index: 0;
+  background: url("./assets/parallel-chain.png") center / contain no-repeat;
+  transform: translateX(-50%);
+}
+
+.task-item.parallel-grouped::after {
+  content: "";
+  position: absolute;
+  left: 75%;
+  top: -13px;
+  width: 10px;
+  height: 26px;
+  pointer-events: none;
+  z-index: 0;
+  background: url("./assets/parallel-chain.png") center / contain no-repeat;
+  transform: translateX(-50%);
+}
+
+.task-item.parallel-first::before,
+.task-item.parallel-first::after {
+  display: none;
+}
+
 .priority-cell {
   position: relative;
+  z-index: 1;
   grid-column: 1;
   width: 34px;
   height: 40px;
@@ -426,6 +474,8 @@
 
 .task-check {
   grid-column: 2;
+  position: relative;
+  z-index: 1;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -469,6 +519,8 @@
 
 .delete-button {
   grid-column: 4;
+  position: relative;
+  z-index: 1;
   width: 40px;
   height: 40px;
   display: grid;
