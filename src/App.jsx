@@ -1,10 +1,16 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { createClient } from '@supabase/supabase-js'
+import pomodoroBreakImage from './assets/pomodoro-break.png'
+import pomodoroTaskGreenImage from './assets/pomodoro-task-green.png'
+import pomodoroTaskRedImage from './assets/pomodoro-task-red.png'
+import pomodoroTaskYellowImage from './assets/pomodoro-task-yellow.png'
+import pomodoroWorkImage from './assets/pomodoro-work.png'
 import './App.css'
 
 const STORAGE_KEY = 'task-manager.tasks'
 const STORAGE_MODE_KEY = 'task-manager.storage-mode'
+const POMODORO_STORAGE_KEY = 'task-manager.pomodoro'
 const STORAGE_VERSION = 2
 const HOLD_STEP_MINUTES = 15
 const HOLD_STEP_MS = HOLD_STEP_MINUTES * 60000
@@ -16,11 +22,23 @@ const DEFAULT_PRIORITY = 'medium'
 const PRIORITY_MENU_WIDTH = 184
 const PRIORITY_MENU_HEIGHT = 202
 const PRIORITY_MENU_GAP = 6
+const POMODORO_MENU_WIDTH = 260
+const POMODORO_MENU_HEIGHT = 184
+const POMODORO_MENU_GAP = 6
 const WINDOW_SIZE_INITIALIZED_KEY = 'task-manager.window.initialized'
 const INITIAL_WINDOW_MIN_WIDTH = 760
 const INITIAL_WINDOW_MAX_WIDTH = 980
 const INITIAL_WINDOW_HEIGHT = 720
 const ONLINE_SAVE_DEBOUNCE_MS = 900
+const DEFAULT_POMODORO_STATE = {
+  enabled: true,
+  workMinutes: 25,
+  breakMinutes: 5,
+  selectedTaskId: null,
+  mode: 'idle',
+  startedAt: null,
+  finishedWorkTaskId: null,
+}
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 const supabase =
@@ -362,6 +380,81 @@ function writeStorageMode(storageMode) {
   localStorage.setItem(STORAGE_MODE_KEY, storageMode)
 }
 
+function readPomodoroState() {
+  try {
+    const savedState = localStorage.getItem(POMODORO_STORAGE_KEY)
+
+    if (!savedState) {
+      return DEFAULT_POMODORO_STATE
+    }
+
+    const parsedState = JSON.parse(savedState)
+    const safeState =
+      parsedState && typeof parsedState === 'object' ? parsedState : {}
+    const mode = ['idle', 'work', 'work-done', 'break'].includes(safeState.mode)
+      ? safeState.mode
+      : DEFAULT_POMODORO_STATE.mode
+
+    return {
+      enabled:
+        typeof safeState.enabled === 'boolean'
+          ? safeState.enabled
+          : DEFAULT_POMODORO_STATE.enabled,
+      workMinutes: Number.isFinite(Number(safeState.workMinutes))
+        ? Math.min(180, Math.max(1, Number(safeState.workMinutes)))
+        : DEFAULT_POMODORO_STATE.workMinutes,
+      breakMinutes: Number.isFinite(Number(safeState.breakMinutes))
+        ? Math.min(60, Math.max(1, Number(safeState.breakMinutes)))
+        : DEFAULT_POMODORO_STATE.breakMinutes,
+      selectedTaskId:
+        typeof safeState.selectedTaskId === 'string'
+          ? safeState.selectedTaskId
+          : null,
+      mode,
+      startedAt: isFiniteTimestamp(safeState.startedAt)
+        ? safeState.startedAt
+        : null,
+      finishedWorkTaskId:
+        typeof safeState.finishedWorkTaskId === 'string'
+          ? safeState.finishedWorkTaskId
+          : null,
+    }
+  } catch {
+    return DEFAULT_POMODORO_STATE
+  }
+}
+
+function writePomodoroState(pomodoroState) {
+  localStorage.setItem(POMODORO_STORAGE_KEY, JSON.stringify(pomodoroState))
+}
+
+function getPomodoroDurationMs(pomodoroState) {
+  return (
+    (pomodoroState.mode === 'break'
+      ? pomodoroState.breakMinutes
+      : pomodoroState.workMinutes) * 60000
+  )
+}
+
+function getPomodoroProgress(pomodoroState, currentTime) {
+  if (pomodoroState.mode === 'work-done') {
+    return 1
+  }
+
+  if (!pomodoroState.startedAt) {
+    return 0
+  }
+
+  return Math.min(
+    1,
+    Math.max(
+      0,
+      (currentTime - pomodoroState.startedAt) /
+        getPomodoroDurationMs(pomodoroState),
+    ),
+  )
+}
+
 function taskToSupabaseRow(task, userId) {
   return {
     id: task.id,
@@ -662,10 +755,13 @@ function App() {
   const [deleteConfirmation, setDeleteConfirmation] = useState(null)
   const [priorityMenuTaskId, setPriorityMenuTaskId] = useState(null)
   const [priorityMenuPosition, setPriorityMenuPosition] = useState(null)
+  const [pomodoroMenuPosition, setPomodoroMenuPosition] = useState(null)
+  const [pomodoro, setPomodoro] = useState(readPomodoroState)
   const [showClosedTasks, setShowClosedTasks] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [frozenTaskOrder, setFrozenTaskOrder] = useState(null)
   const holdRepeatRef = useRef(null)
+  const pomodoroAudioContextRef = useRef(null)
   const onlineLoadedRef = useRef(false)
   const onlineTasksSnapshotRef = useRef(new Map())
   const taskItemRefs = useRef(new Map())
@@ -689,6 +785,52 @@ function App() {
   function closePriorityMenu() {
     setPriorityMenuTaskId(null)
     setPriorityMenuPosition(null)
+  }
+
+  function closePomodoroMenu() {
+    setPomodoroMenuPosition(null)
+  }
+
+  function getPomodoroMenuPosition(event) {
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+
+    return {
+      left: Math.min(
+        Math.max(POMODORO_MENU_GAP, event.clientX),
+        viewportWidth - POMODORO_MENU_WIDTH - POMODORO_MENU_GAP,
+      ),
+      top: Math.min(
+        Math.max(POMODORO_MENU_GAP, event.clientY),
+        viewportHeight - POMODORO_MENU_HEIGHT - POMODORO_MENU_GAP,
+      ),
+    }
+  }
+
+  function playPomodoroBeep() {
+    const AudioContext = window.AudioContext || window.webkitAudioContext
+
+    if (!AudioContext) {
+      return
+    }
+
+    const audioContext =
+      pomodoroAudioContextRef.current || new AudioContext()
+    pomodoroAudioContextRef.current = audioContext
+
+    const oscillator = audioContext.createOscillator()
+    const gain = audioContext.createGain()
+
+    oscillator.type = 'sine'
+    oscillator.frequency.setValueAtTime(880, audioContext.currentTime)
+    gain.gain.setValueAtTime(0.0001, audioContext.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.14, audioContext.currentTime + 0.02)
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.2)
+
+    oscillator.connect(gain)
+    gain.connect(audioContext.destination)
+    oscillator.start()
+    oscillator.stop(audioContext.currentTime + 0.22)
   }
 
   function getPriorityMenuPosition(buttonElement) {
@@ -831,6 +973,36 @@ function App() {
   }, [priorityMenuTaskId])
 
   useEffect(() => {
+    if (!pomodoroMenuPosition) {
+      return undefined
+    }
+
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') {
+        closePomodoroMenu()
+      }
+    }
+
+    function closeOnOutsideClick(event) {
+      if (!event.target.closest('.pomodoro-menu')) {
+        closePomodoroMenu()
+      }
+    }
+
+    window.addEventListener('resize', closePomodoroMenu)
+    document.addEventListener('scroll', closePomodoroMenu, true)
+    document.addEventListener('keydown', closeOnEscape)
+    document.addEventListener('mousedown', closeOnOutsideClick)
+
+    return () => {
+      window.removeEventListener('resize', closePomodoroMenu)
+      document.removeEventListener('scroll', closePomodoroMenu, true)
+      document.removeEventListener('keydown', closeOnEscape)
+      document.removeEventListener('mousedown', closeOnOutsideClick)
+    }
+  }, [pomodoroMenuPosition])
+
+  useEffect(() => {
     if (!detailEditor && !deleteConfirmation) {
       return undefined
     }
@@ -849,6 +1021,87 @@ function App() {
 
     return () => document.removeEventListener('keydown', closeOnEscape)
   }, [detailEditor, deleteConfirmation])
+
+  useEffect(() => {
+    writePomodoroState(pomodoro)
+  }, [pomodoro])
+
+  useEffect(() => {
+    if (!pomodoro.enabled) {
+      return
+    }
+
+    const activeSelectedTask = tasks.find(
+      (task) => task.id === pomodoro.selectedTaskId && !task.completed,
+    )
+
+    if (activeSelectedTask) {
+      return
+    }
+
+    const firstActiveTask = tasks.find((task) => !task.completed)
+    const timeoutId = window.setTimeout(() => {
+      setPomodoro((current) => ({
+        ...current,
+        selectedTaskId: firstActiveTask?.id || null,
+        mode: 'idle',
+        startedAt: null,
+        finishedWorkTaskId: null,
+      }))
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [tasks, pomodoro.enabled, pomodoro.selectedTaskId])
+
+  useEffect(() => {
+    if (
+      !pomodoro.enabled ||
+      !pomodoro.startedAt ||
+      !['work', 'break'].includes(pomodoro.mode)
+    ) {
+      return
+    }
+
+    const durationMs = getPomodoroDurationMs(pomodoro)
+
+    if (now - pomodoro.startedAt < durationMs) {
+      return
+    }
+
+    if (pomodoro.mode === 'work') {
+      const timeoutId = window.setTimeout(() => {
+        setPomodoro((current) => ({
+          ...current,
+          mode: 'work-done',
+          startedAt: null,
+          finishedWorkTaskId: current.selectedTaskId,
+        }))
+      }, 0)
+
+      return () => window.clearTimeout(timeoutId)
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setPomodoro((current) => ({
+        ...current,
+        mode: 'idle',
+        startedAt: null,
+      }))
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [now, pomodoro])
+
+  useEffect(() => {
+    if (!pomodoro.enabled || pomodoro.mode !== 'work-done') {
+      return undefined
+    }
+
+    playPomodoroBeep()
+    const intervalId = window.setInterval(playPomodoroBeep, 900)
+
+    return () => window.clearInterval(intervalId)
+  }, [pomodoro.enabled, pomodoro.mode])
 
   useEffect(() => {
     if (!supabase) {
@@ -1609,7 +1862,7 @@ function App() {
   function handleTaskContextMenu(event, task) {
     if (
       event.target.closest(
-        'button, input, .hold-timer, .dependency-reason, .closed-date, .priority-cell',
+        'button, input, .hold-timer, .dependency-reason, .closed-date, .priority-cell, .pomodoro-task-cell',
       )
     ) {
       return
@@ -1627,7 +1880,7 @@ function App() {
     if (
       event.button !== 2 ||
       event.target.closest(
-        'button, input, .hold-timer, .dependency-reason, .closed-date, .priority-cell',
+        'button, input, .hold-timer, .dependency-reason, .closed-date, .priority-cell, .pomodoro-task-cell',
       )
     ) {
       return
@@ -1671,6 +1924,144 @@ function App() {
     }
 
     setHoldEditor(null)
+  }
+
+  function getPomodoroTaskState(task) {
+    if (!pomodoro.enabled) {
+      return null
+    }
+
+    if (pomodoro.mode === 'work' && task.id === pomodoro.selectedTaskId) {
+      return 'red'
+    }
+
+    if (
+      pomodoro.finishedWorkTaskId &&
+      task.id === pomodoro.finishedWorkTaskId &&
+      pomodoro.mode !== 'work'
+    ) {
+      return 'yellow'
+    }
+
+    if (task.id === pomodoro.selectedTaskId) {
+      return 'green'
+    }
+
+    return null
+  }
+
+  function getPomodoroTaskImage(taskState) {
+    if (taskState === 'red') {
+      return pomodoroTaskRedImage
+    }
+
+    if (taskState === 'yellow') {
+      return pomodoroTaskYellowImage
+    }
+
+    return pomodoroTaskGreenImage
+  }
+
+  function handlePomodoroClick() {
+    closePomodoroMenu()
+
+    if (!pomodoro.enabled) {
+      setPomodoro((current) => ({
+        ...current,
+        enabled: true,
+      }))
+      return
+    }
+
+    if (pomodoro.mode === 'work-done') {
+      setPomodoro((current) => ({
+        ...current,
+        mode: 'break',
+        startedAt: Date.now(),
+      }))
+      return
+    }
+
+    if (pomodoro.mode !== 'idle' || !pomodoro.selectedTaskId) {
+      return
+    }
+
+    const AudioContext = window.AudioContext || window.webkitAudioContext
+
+    if (AudioContext && !pomodoroAudioContextRef.current) {
+      pomodoroAudioContextRef.current = new AudioContext()
+    }
+
+    pomodoroAudioContextRef.current?.resume?.()
+    setPomodoro((current) => ({
+      ...current,
+      mode: 'work',
+      startedAt: Date.now(),
+      finishedWorkTaskId: null,
+    }))
+  }
+
+  function handlePomodoroContextMenu(event) {
+    event.preventDefault()
+    event.stopPropagation()
+    closePriorityMenu()
+    setPomodoroMenuPosition(getPomodoroMenuPosition(event))
+  }
+
+  function updatePomodoroSettings(field, value) {
+    const numericValue = Number(value)
+    const maxValue = field === 'breakMinutes' ? 60 : 180
+
+    setPomodoro((current) => ({
+      ...current,
+      [field]: Number.isFinite(numericValue)
+        ? Math.min(maxValue, Math.max(1, Math.round(numericValue)))
+        : current[field],
+    }))
+  }
+
+  function togglePomodoroEnabled() {
+    setPomodoro((current) => ({
+      ...current,
+      enabled: !current.enabled,
+      mode: 'idle',
+      startedAt: null,
+      finishedWorkTaskId: current.enabled ? null : current.finishedWorkTaskId,
+    }))
+  }
+
+  function handlePomodoroDragStart(event, task) {
+    if (!pomodoro.enabled || task.completed || !getPomodoroTaskState(task)) {
+      event.preventDefault()
+      return
+    }
+
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', task.id)
+  }
+
+  function handlePomodoroDragOver(event, task) {
+    if (!pomodoro.enabled || task.completed) {
+      return
+    }
+
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+  }
+
+  function handlePomodoroDrop(event, task) {
+    if (!pomodoro.enabled || task.completed) {
+      return
+    }
+
+    event.preventDefault()
+    setPomodoro((current) => ({
+      ...current,
+      selectedTaskId: task.id,
+      mode: 'idle',
+      startedAt: null,
+      finishedWorkTaskId: null,
+    }))
   }
 
   function openDetailEditor(event, task) {
@@ -1761,6 +2152,29 @@ function App() {
   const priorityMenuTaskPriority = priorityMenuTask
     ? getTaskPriority(priorityMenuTask)
     : null
+  const pomodoroProgress = getPomodoroProgress(pomodoro, now)
+  const pomodoroImage =
+    pomodoro.mode === 'break' ? pomodoroBreakImage : pomodoroWorkImage
+  const pomodoroMinutes =
+    pomodoro.mode === 'break' ? pomodoro.breakMinutes : pomodoro.workMinutes
+  const pomodoroRemainingMs =
+    pomodoro.startedAt && pomodoro.mode !== 'work-done'
+      ? Math.max(
+          0,
+          getPomodoroDurationMs(pomodoro) - (now - pomodoro.startedAt),
+        )
+      : getPomodoroDurationMs(pomodoro)
+  const pomodoroRemainingTotalSeconds = Math.ceil(pomodoroRemainingMs / 1000)
+  const pomodoroRemainingMinutes = Math.floor(
+    pomodoroRemainingTotalSeconds / 60,
+  )
+  const pomodoroRemainingSeconds = pomodoroRemainingTotalSeconds % 60
+  const pomodoroTimeLabel =
+    pomodoro.mode === 'work-done'
+      ? '00:00'
+      : `${String(pomodoroRemainingMinutes).padStart(2, '0')}:${String(
+          pomodoroRemainingSeconds,
+        ).padStart(2, '0')}`
 
   return (
     <main className="app">
@@ -1800,6 +2214,34 @@ function App() {
             </button>
             <span>{activeCount} активных</span>
           </div>
+          <button
+            className={[
+              'pomodoro-widget',
+              pomodoro.enabled ? '' : 'disabled',
+              pomodoro.mode === 'work-done' ? 'done' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            type="button"
+            onClick={handlePomodoroClick}
+            onContextMenu={handlePomodoroContextMenu}
+            style={{
+              '--pomodoro-progress': `${pomodoroProgress * 360}deg`,
+            }}
+            aria-label={
+              pomodoro.enabled
+                ? `Pomodoro: ${pomodoroTimeLabel}, ${pomodoroMinutes} минут`
+                : 'Pomodoro выключен'
+            }
+            title="Левый клик - старт или перерыв. Правый клик - настройки."
+          >
+            <span className="pomodoro-tomato">
+              <img src={pomodoroImage} alt="" />
+            </span>
+            {pomodoro.enabled ? (
+              <span className="pomodoro-time">{pomodoroTimeLabel}</span>
+            ) : null}
+          </button>
         </header>
 
         <section className="storage-panel" aria-label="Режим хранения задач">
@@ -1915,6 +2357,7 @@ function App() {
               const closed = isTaskClosed(task)
               const closedAt = task.completedAt || task.createdAt
               const displayedPriority = getDisplayedTaskPriority(task, tasks)
+              const pomodoroTaskState = getPomodoroTaskState(task)
               const itemClassName = [
                 'task-item',
                 closed ? 'completed' : '',
@@ -1947,6 +2390,8 @@ function App() {
                   }}
                   onContextMenu={(event) => handleTaskContextMenu(event, task)}
                   onMouseDown={(event) => handleTaskMouseDown(event, task)}
+                  onDragOver={(event) => handlePomodoroDragOver(event, task)}
+                  onDrop={(event) => handlePomodoroDrop(event, task)}
                   onDoubleClick={(event) => openDetailEditor(event, task)}
                 >
                   <div className="priority-cell">
@@ -2032,6 +2477,26 @@ function App() {
                       {formatClosedAt(closedAt)}
                     </time>
                   ) : null}
+                  <div
+                    className={[
+                      'pomodoro-task-cell',
+                      pomodoroTaskState ? 'active' : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                  >
+                    {pomodoroTaskState ? (
+                      <img
+                        src={getPomodoroTaskImage(pomodoroTaskState)}
+                        alt=""
+                        draggable={!closed}
+                        onDragStart={(event) =>
+                          handlePomodoroDragStart(event, task)
+                        }
+                        title="Перетащите на другую задачу, чтобы перенести Pomodoro."
+                      />
+                    ) : null}
+                  </div>
                   <button
                     className="delete-button"
                     type="button"
@@ -2091,6 +2556,54 @@ function App() {
                 </button>
               ))}
             </div>,
+            document.body,
+          )
+        : null}
+
+      {pomodoroMenuPosition && typeof document !== 'undefined'
+        ? createPortal(
+            <form
+              className="pomodoro-menu"
+              style={{
+                left: `${pomodoroMenuPosition.left}px`,
+                top: `${pomodoroMenuPosition.top}px`,
+              }}
+              onSubmit={(event) => event.preventDefault()}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <label>
+                <span>Работа, минут</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="180"
+                  value={pomodoro.workMinutes}
+                  onChange={(event) =>
+                    updatePomodoroSettings('workMinutes', event.target.value)
+                  }
+                />
+              </label>
+              <label>
+                <span>Отдых, минут</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="60"
+                  value={pomodoro.breakMinutes}
+                  onChange={(event) =>
+                    updatePomodoroSettings('breakMinutes', event.target.value)
+                  }
+                />
+              </label>
+              <label className="pomodoro-enabled-row">
+                <input
+                  type="checkbox"
+                  checked={pomodoro.enabled}
+                  onChange={togglePomodoroEnabled}
+                />
+                <span>Включить Pomodoro</span>
+              </label>
+            </form>,
             document.body,
           )
         : null}

@@ -21,10 +21,10 @@
 .task-header {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: auto minmax(220px, 420px) auto;
+  grid-template-columns: auto minmax(220px, 420px) auto 82px;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
+  gap: 16px;
   margin: -5px 0 24px;
 }
 
@@ -120,6 +120,123 @@
 .task-stats .completed-toggle:active {
   transform: translateY(1px);
   box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.18);
+}
+
+.pomodoro-widget {
+  position: relative;
+  width: 82px;
+  height: 82px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  cursor: pointer;
+}
+
+.pomodoro-widget.disabled {
+  opacity: 0.42;
+}
+
+.pomodoro-widget.done {
+  animation: pomodoro-blink 0.8s steps(2, end) infinite;
+}
+
+.pomodoro-tomato {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+
+.pomodoro-tomato::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border-radius: 999px;
+  background: conic-gradient(
+    from -90deg,
+    rgba(255, 255, 255, 0.48) 0deg var(--pomodoro-progress, 0deg),
+    transparent var(--pomodoro-progress, 0deg) 360deg
+  );
+  mix-blend-mode: screen;
+  pointer-events: none;
+}
+
+.pomodoro-widget img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 8px 8px rgba(15, 23, 42, 0.16));
+}
+
+.pomodoro-time {
+  position: relative;
+  z-index: 1;
+  min-width: 48px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(15, 23, 42, 0.42);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pomodoro-menu {
+  position: fixed;
+  z-index: 1000;
+  width: 260px;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.16);
+}
+
+.pomodoro-menu label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.pomodoro-menu input[type='number'] {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--bg);
+  font: inherit;
+}
+
+.pomodoro-menu input:focus {
+  border-color: var(--accent);
+  outline: 3px solid var(--focus);
+}
+
+.pomodoro-enabled-row {
+  grid-template-columns: 20px 1fr;
+  align-items: center;
+}
+
+.pomodoro-enabled-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+@keyframes pomodoro-blink {
+  50% {
+    opacity: 0;
+  }
 }
 
 .storage-panel {
@@ -332,7 +449,7 @@
   position: relative;
   z-index: 0;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto 40px;
+  grid-template-columns: 34px minmax(0, 1fr) auto 48px 40px;
   align-items: center;
   gap: 10px;
   min-height: 64px;
@@ -568,7 +685,7 @@
 }
 
 .delete-button {
-  grid-column: 4;
+  grid-column: 5;
   position: relative;
   z-index: 1;
   width: 40px;
@@ -579,6 +696,32 @@
   background: var(--danger-bg);
   font-size: 24px;
   line-height: 1;
+}
+
+.pomodoro-task-cell {
+  grid-column: 4;
+  position: relative;
+  z-index: 1;
+  width: 48px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+}
+
+.pomodoro-task-cell.active {
+  cursor: grab;
+}
+
+.pomodoro-task-cell img {
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+  user-select: none;
+  filter: drop-shadow(0 4px 5px rgba(15, 23, 42, 0.18));
+}
+
+.pomodoro-task-cell img:active {
+  cursor: grabbing;
 }
 
 .delete-button:hover {
@@ -991,6 +1134,12 @@
     justify-content: flex-start;
   }
 
+  .pomodoro-widget {
+    justify-self: start;
+    width: 74px;
+    height: 74px;
+  }
+
   .storage-panel {
     grid-template-columns: 1fr;
     align-items: stretch;
@@ -1019,11 +1168,16 @@
   }
 
   .task-item {
-    grid-template-columns: 34px minmax(0, 1fr) 40px;
+    grid-template-columns: 34px minmax(0, 1fr) 44px 40px;
   }
 
   .delete-button {
+    grid-column: 4;
+  }
+
+  .pomodoro-task-cell {
     grid-column: 3;
+    width: 44px;
   }
 
 .closed-date,
