@@ -964,6 +964,7 @@
 
 .hold-dialog,
 .confirm-dialog,
+.migration-dialog,
 .pomodoro-help-dialog,
 .sync-log-dialog,
 .detail-dialog {
@@ -979,6 +980,11 @@
 }
 
 .confirm-dialog {
+  gap: 16px;
+}
+
+.migration-dialog {
+  width: min(560px, 100%);
   gap: 16px;
 }
 
@@ -1026,6 +1032,7 @@
 
 .hold-dialog h2,
 .confirm-dialog h2,
+.migration-dialog h2,
 .pomodoro-help-dialog h2,
 .sync-log-dialog h2,
 .detail-dialog h2 {
@@ -1036,6 +1043,7 @@
 }
 
 .confirm-dialog p,
+.migration-dialog p,
 .pomodoro-help-dialog p {
   margin: 0;
   color: var(--text);
@@ -1297,6 +1305,7 @@
 
 .hold-dialog-actions,
 .confirm-dialog-actions,
+.migration-dialog-actions,
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -1306,6 +1315,7 @@
 
 .hold-dialog-actions button,
 .confirm-dialog-actions button,
+.migration-dialog-actions button,
 .dialog-actions button {
   min-height: 40px;
   padding: 0 14px;

@@ -903,6 +903,22 @@ function getInitialTasksForStorageMode() {
   return readStorageMode() === 'online' ? [] : readStoredTasks()
 }
 
+function hasSupabaseAuthCallback() {
+  if (typeof window === 'undefined') {
+    return false
+  }
+
+  const searchParams = new URLSearchParams(window.location.search)
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+
+  return (
+    searchParams.has('code') ||
+    searchParams.get('type') === 'magiclink' ||
+    hashParams.has('access_token') ||
+    hashParams.has('refresh_token')
+  )
+}
+
 function App() {
   const [tasks, setTasks] = useState(getInitialTasksForStorageMode)
   const [storageMode, setStorageMode] = useState(readStorageMode)
@@ -918,6 +934,8 @@ function App() {
     warning: true,
     info: true,
   })
+  const [magicLinkNoticeOpen, setMagicLinkNoticeOpen] = useState(false)
+  const [migrationDialogOpen, setMigrationDialogOpen] = useState(false)
   const [instanceStatus, setInstanceStatus] = useState('checking')
   const [taskText, setTaskText] = useState('')
   const [now, setNow] = useState(() => Date.now())
@@ -934,6 +952,8 @@ function App() {
   const [frozenTaskOrder, setFrozenTaskOrder] = useState(null)
   const instanceIdRef = useRef(getStableTaskId())
   const instanceStatusRef = useRef('checking')
+  const authCallbackTakeoverRef = useRef(hasSupabaseAuthCallback())
+  const instanceYieldedRef = useRef(false)
   const holdRepeatRef = useRef(null)
   const pomodoroAudioContextRef = useRef(null)
   const pomodoroSoundEnabledRef = useRef(pomodoro.soundEnabled)
@@ -1228,6 +1248,30 @@ function App() {
         return
       }
 
+      if (
+        message.type === 'auth-takeover-request' &&
+        instanceStatusRef.current === 'active'
+      ) {
+        instanceYieldedRef.current = true
+        stopHeartbeat()
+        removeInstanceLock(instanceId)
+        updateInstanceStatus('blocked')
+        channel.postMessage({
+          type: 'auth-takeover-ready',
+          instanceId,
+          targetInstanceId: message.instanceId,
+        })
+        return
+      }
+
+      if (
+        message.type === 'auth-takeover-ready' &&
+        message.targetInstanceId === instanceId
+      ) {
+        acquireOrBlock()
+        return
+      }
+
       if (message.type === 'ping' && instanceStatusRef.current === 'active') {
         channel.postMessage({ type: 'active', instanceId })
       }
@@ -1262,8 +1306,15 @@ function App() {
     window.addEventListener('beforeunload', releaseLock)
     channel?.postMessage({ type: 'ping', instanceId })
     acquireOrBlock()
+    if (authCallbackTakeoverRef.current && instanceStatusRef.current !== 'active') {
+      channel?.postMessage({ type: 'auth-takeover-request', instanceId })
+    }
     staleCheckId = window.setInterval(() => {
-      if (instanceStatusRef.current === 'blocked' && isInstanceLockStale(readInstanceLock())) {
+      if (
+        !instanceYieldedRef.current &&
+        instanceStatusRef.current === 'blocked' &&
+        isInstanceLockStale(readInstanceLock())
+      ) {
         acquireOrBlock()
       }
     }, 1000)
@@ -1428,13 +1479,24 @@ function App() {
       return undefined
     }
 
-    if (!detailEditor && !deleteConfirmation && !pomodoroHelpOpen && !syncLogSnapshot) {
+    if (
+      !detailEditor &&
+      !deleteConfirmation &&
+      !pomodoroHelpOpen &&
+      !syncLogSnapshot &&
+      !magicLinkNoticeOpen &&
+      !migrationDialogOpen
+    ) {
       return undefined
     }
 
     function closeOnEscape(event) {
       if (event.key === 'Escape') {
-        if (syncLogSnapshot) {
+        if (magicLinkNoticeOpen) {
+          setMagicLinkNoticeOpen(false)
+        } else if (migrationDialogOpen) {
+          setMigrationDialogOpen(false)
+        } else if (syncLogSnapshot) {
           closeSyncLog()
         } else if (pomodoroHelpOpen) {
           setPomodoroHelpOpen(false)
@@ -1449,7 +1511,15 @@ function App() {
     document.addEventListener('keydown', closeOnEscape)
 
     return () => document.removeEventListener('keydown', closeOnEscape)
-  }, [detailEditor, deleteConfirmation, instanceActive, pomodoroHelpOpen, syncLogSnapshot])
+  }, [
+    detailEditor,
+    deleteConfirmation,
+    instanceActive,
+    magicLinkNoticeOpen,
+    migrationDialogOpen,
+    pomodoroHelpOpen,
+    syncLogSnapshot,
+  ])
 
   useEffect(() => {
     if (!instanceActive) {
@@ -2040,6 +2110,7 @@ function App() {
       }
 
       setSyncStatus('signed-out')
+      setMagicLinkNoticeOpen(true)
       setSyncMessage('Проверьте почту и откройте ссылку для входа')
     } catch (error) {
       setSyncStatus('error')
@@ -2061,7 +2132,7 @@ function App() {
     setStorageMode('local')
   }
 
-  async function migrateLocalTasksOnline() {
+  async function migrateLocalTasksOnline(strategy) {
     if (!supabase || !session) {
       return
     }
@@ -2071,17 +2142,28 @@ function App() {
       setSyncMessage('Переносим локальные задачи в онлайн')
 
       const localTasks = readStoredTasks()
+      const onlineTasks = tasks
+      const localTaskIds = new Set(localTasks.map((task) => task.id))
+      const tasksToSave =
+        strategy === 'merge'
+          ? normalizeTasks([
+              ...localTasks,
+              ...onlineTasks.filter((task) => !localTaskIds.has(task.id)),
+            ])
+          : localTasks
       const saveResult = await saveSupabaseTasks(
-        localTasks,
+        tasksToSave,
         session.user.id,
         onlineTasksSnapshotRef.current,
         onlineKnownTaskIdsRef.current,
       )
 
       onlineTasksSnapshotRef.current = saveResult.nextSnapshot
-      onlineKnownTaskIdsRef.current = saveResult.nextKnownTaskIds
+      onlineKnownTaskIdsRef.current =
+        saveResult.nextKnownTaskIds || onlineKnownTaskIdsRef.current
       onlineLoadedRef.current = true
-      setTasks(localTasks)
+      setTasks(tasksToSave)
+      setMigrationDialogOpen(false)
       setSyncStatus('synced')
       setSyncMessage('Локальные задачи перенесены в онлайн')
     } catch (error) {
@@ -3124,7 +3206,7 @@ function App() {
 
           {storageMode === 'online' && session ? (
             <div className="online-actions">
-              <button type="button" onClick={migrateLocalTasksOnline}>
+              <button type="button" onClick={() => setMigrationDialogOpen(true)}>
                 Перенести локальные
               </button>
               <button type="button" onClick={signOutOnline}>
@@ -3468,6 +3550,54 @@ function App() {
               <button type="submit">Сохранить</button>
             </div>
           </form>
+        </div>
+      ) : null}
+
+      {magicLinkNoticeOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="confirm-dialog" role="dialog" aria-modal="true">
+            <h2>Письмо для входа отправлено</h2>
+            <p>
+              Откройте email, перейдите по magic link и дождитесь загрузки
+              приложения.
+            </p>
+            <div className="confirm-dialog-actions">
+              <button type="button" onClick={() => setMagicLinkNoticeOpen(false)}>
+                ОК
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {migrationDialogOpen ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setMigrationDialogOpen(false)
+            }
+          }}
+        >
+          <section className="migration-dialog" role="dialog" aria-modal="true">
+            <h2>Перенести локальные задачи?</h2>
+            <p>
+              В онлайн-хранилище уже могут быть задачи. Выберите, что сделать с
+              ними при переносе локального списка.
+            </p>
+            <div className="migration-dialog-actions">
+              <button type="button" onClick={() => migrateLocalTasksOnline('replace')}>
+                Удалить старые онлайн
+              </button>
+              <button type="button" onClick={() => migrateLocalTasksOnline('merge')}>
+                Объединить
+              </button>
+              <button type="button" onClick={() => setMigrationDialogOpen(false)}>
+                Отмена
+              </button>
+            </div>
+          </section>
         </div>
       ) : null}
 
