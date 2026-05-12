@@ -65,6 +65,13 @@ const PRIORITIES = [
   { id: 'medium', label: 'Средний', icon: 'equals', rank: 3 },
   { id: 'low', label: 'Низкий', icon: 'down', rank: 4 },
 ]
+const TASK_PRIORITY_CODE_MAP = {
+  1: 'low',
+  2: 'medium',
+  3: 'high',
+  4: 'very-high',
+  5: 'critical',
+}
 
 function getInitialDemoTasks(currentTime = Date.now()) {
   return [
@@ -904,6 +911,25 @@ function normalizeSearchText(value) {
   return String(value || '').trim().toLocaleLowerCase('ru-RU')
 }
 
+function parseTaskCreationCommand(value) {
+  const rawTitle = String(value || '').trim()
+  const matchedPrefix = rawTitle.match(/^([1-5])(\d)?(?=\s|$)\s*/)
+
+  if (!matchedPrefix) {
+    return {
+      title: rawTitle,
+      priority: DEFAULT_PRIORITY,
+      openDetails: false,
+    }
+  }
+
+  return {
+    title: rawTitle.slice(matchedPrefix[0].length).trim(),
+    priority: TASK_PRIORITY_CODE_MAP[matchedPrefix[1]] || DEFAULT_PRIORITY,
+    openDetails: Boolean(matchedPrefix[2]),
+  }
+}
+
 function getInitialTasksForStorageMode() {
   return readStorageMode() === 'online' ? [] : readStoredTasks()
 }
@@ -946,6 +972,7 @@ function App() {
   const [now, setNow] = useState(() => Date.now())
   const [holdEditor, setHoldEditor] = useState(null)
   const [detailEditor, setDetailEditor] = useState(null)
+  const [pendingDetailTask, setPendingDetailTask] = useState(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState(null)
   const [pomodoroHelpOpen, setPomodoroHelpOpen] = useState(false)
   const [priorityMenuTaskId, setPriorityMenuTaskId] = useState(null)
@@ -1012,6 +1039,48 @@ function App() {
     },
     [],
   )
+
+  const closeDetailEditor = useCallback(() => {
+    if (pendingDetailTask) {
+      const title = detailEditor?.title?.trim() || pendingDetailTask.title
+      const relationships = detailEditor?.relationships || []
+
+      setTasks((currentTasks) => {
+        const parallelTask = relationships
+          .filter((relation) => relation.type === 'parallel')
+          .map((relation) => currentTasks.find((task) => task.id === relation.taskId))
+          .find(Boolean)
+        const taskToCreate = {
+          ...pendingDetailTask,
+          title,
+          priority: detailEditor?.priority || pendingDetailTask.priority,
+          description: detailEditor?.description || pendingDetailTask.description,
+          dependencies: relationships
+            .filter((relation) => relation.type === 'depends-on')
+            .map((relation) => relation.taskId),
+          parallelGroupId: parallelTask
+            ? getTaskParallelGroupId(parallelTask) || `parallel-${getStableTaskId()}`
+            : null,
+        }
+        const tasksWithParallelGroup =
+          parallelTask && !getTaskParallelGroupId(parallelTask)
+            ? currentTasks.map((task) =>
+                relationships.some(
+                  (relation) =>
+                    relation.type === 'parallel' && relation.taskId === task.id,
+                )
+                  ? { ...task, parallelGroupId: taskToCreate.parallelGroupId }
+                  : task,
+              )
+            : currentTasks
+
+        return normalizeParallelGroups([taskToCreate, ...tasksWithParallelGroup])
+      })
+      setPendingDetailTask(null)
+    }
+
+    setDetailEditor(null)
+  }, [detailEditor, pendingDetailTask])
 
   function clearHoldRepeat() {
     if (!holdRepeatRef.current) {
@@ -1520,6 +1589,7 @@ function App() {
     detailEditor,
     deleteConfirmation,
     instanceActive,
+    closeDetailEditor,
     magicLinkNoticeOpen,
     migrationDialogOpen,
     pomodoroHelpOpen,
@@ -2210,27 +2280,43 @@ function App() {
   function addTask(event) {
     event.preventDefault()
 
-    const title = taskText.trim()
+    const creationCommand = parseTaskCreationCommand(taskText)
+    const title = creationCommand.title
 
     if (!title) {
       return
     }
 
-    setTasks((currentTasks) => [
-      {
-        id: getStableTaskId(),
-        title,
-        description: '',
-        dependencies: [],
-        parallelGroupId: null,
-        priority: DEFAULT_PRIORITY,
-        completed: false,
-        completedAt: null,
-        createdAt: Date.now(),
-        holdUntil: null,
-      },
-      ...currentTasks,
-    ])
+    const nextTask = {
+      id: getStableTaskId(),
+      title,
+      description: '',
+      dependencies: [],
+      parallelGroupId: null,
+      priority: creationCommand.priority,
+      completed: false,
+      completedAt: null,
+      createdAt: Date.now(),
+      holdUntil: null,
+    }
+
+    if (creationCommand.openDetails) {
+      setPendingDetailTask(nextTask)
+      setDetailEditor({
+        taskId: nextTask.id,
+        title: nextTask.title,
+        priority: nextTask.priority,
+        description: nextTask.description,
+        readonly: false,
+        relationships: [],
+        selectedRelationType: 'depends-on',
+        selectedLinkedTaskId: '',
+      })
+      setTaskText('')
+      return
+    }
+
+    setTasks((currentTasks) => [nextTask, ...currentTasks])
     setTaskText('')
   }
 
@@ -2489,6 +2575,18 @@ function App() {
       return
     }
 
+    if (pendingDetailTask?.id === detailEditor.taskId) {
+      setPendingDetailTask((currentTask) =>
+        currentTask
+          ? {
+              ...currentTask,
+              [field]: field === 'title' ? value.trim() : value,
+            }
+          : currentTask,
+      )
+      return
+    }
+
     setTasks((currentTasks) =>
       currentTasks.map((task) =>
         task.id === detailEditor.taskId && !task.completed
@@ -2592,10 +2690,6 @@ function App() {
       ...current,
       relationships: nextRelationships,
     }))
-  }
-
-  function closeDetailEditor() {
-    setDetailEditor(null)
   }
 
   function handleDetailSubmit(event) {
