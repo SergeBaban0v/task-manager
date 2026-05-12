@@ -50,7 +50,12 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 const supabase =
   SUPABASE_URL && SUPABASE_ANON_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: {
+          detectSessionInUrl: true,
+          flowType: 'implicit',
+        },
+      })
     : null
 
 const PRIORITIES = [
@@ -1678,10 +1683,6 @@ function App() {
   }, [instanceActive, pomodoro.enabled, pomodoro.mode, pomodoro.needsTaskSelection])
 
   useEffect(() => {
-    if (!instanceActive) {
-      return undefined
-    }
-
     if (!supabase) {
       return undefined
     }
@@ -1717,7 +1718,7 @@ function App() {
       mounted = false
       subscription.unsubscribe()
     }
-  }, [instanceActive])
+  }, [])
 
   useEffect(() => {
     if (!instanceActive) {
