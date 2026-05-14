@@ -6,11 +6,16 @@ import pomodoroTaskGreenImage from './assets/pomodoro-task-green.png'
 import pomodoroTaskRedImage from './assets/pomodoro-task-red.png'
 import pomodoroTaskYellowImage from './assets/pomodoro-task-yellow.png'
 import pomodoroWorkImage from './assets/pomodoro-work.png'
+import taskLabelBlueImage from './assets/task-label-blue.png'
+import taskLabelGreenImage from './assets/task-label-green.png'
+import taskLabelRedImage from './assets/task-label-red.png'
+import taskLabelYellowImage from './assets/task-label-yellow.png'
 import './App.css'
 
 const STORAGE_KEY = 'task-manager.tasks'
 const STORAGE_MODE_KEY = 'task-manager.storage-mode'
 const POMODORO_STORAGE_KEY = 'task-manager.pomodoro'
+const LABEL_BEHAVIORS_STORAGE_KEY = 'task-manager.label-behaviors'
 const INSTANCE_LOCK_KEY = 'task-manager.instance-lock'
 const INSTANCE_CHANNEL_NAME = 'task-manager-instance'
 const STORAGE_VERSION = 2
@@ -65,6 +70,24 @@ const PRIORITIES = [
   { id: 'medium', label: 'Средний', icon: 'equals', rank: 3 },
   { id: 'low', label: 'Низкий', icon: 'down', rank: 4 },
 ]
+const QUICK_TAGS = ['[Сбер]', '[Задачи]', '[Дом]']
+const TASK_LABELS = [
+  { id: 'red', name: 'Красный', image: taskLabelRedImage },
+  { id: 'yellow', name: 'Желтый', image: taskLabelYellowImage },
+  { id: 'green', name: 'Зеленый', image: taskLabelGreenImage },
+  { id: 'blue', name: 'Синий', image: taskLabelBlueImage },
+]
+const LABEL_BEHAVIORS = [
+  { id: 'none', label: 'Нет функции' },
+  { id: 'chain', label: 'Цепочка' },
+]
+const DEFAULT_LABEL_BEHAVIORS = TASK_LABELS.reduce(
+  (behaviors, label) => ({
+    ...behaviors,
+    [label.id]: 'none',
+  }),
+  {},
+)
 const TASK_PRIORITY_CODE_MAP = {
   1: 'low',
   2: 'medium',
@@ -163,6 +186,7 @@ const RELATION_TYPES = [
   { id: 'depends-on', label: 'зависит от' },
   { id: 'blocks', label: 'блокирует' },
   { id: 'parallel', label: 'выполняется одновременно' },
+  { id: 'chain', label: 'Цепочка' },
 ]
 
 function getTaskPriority(task) {
@@ -176,6 +200,13 @@ function getRelationType(relationTypeId) {
   return (
     RELATION_TYPES.find((relationType) => relationType.id === relationTypeId) ||
     RELATION_TYPES[0]
+  )
+}
+
+function getLabelBehaviorLabel(behaviorId) {
+  return (
+    LABEL_BEHAVIORS.find((behavior) => behavior.id === behaviorId)?.label ||
+    LABEL_BEHAVIORS[0].label
   )
 }
 
@@ -272,6 +303,54 @@ function isFiniteTimestamp(value) {
   return Number.isFinite(value) && value > 0
 }
 
+function normalizeIdList(value, allowedIds = null) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return [
+    ...new Set(
+      value
+        .filter(Boolean)
+        .map(String)
+        .filter((id) => !allowedIds || allowedIds.has(id)),
+    ),
+  ]
+}
+
+function getTaskLabelIds(task) {
+  return normalizeIdList(
+    task?.labelIds,
+    new Set(TASK_LABELS.map((label) => label.id)),
+  )
+}
+
+function getTaskChainIds(task) {
+  return normalizeIdList(task?.chainTaskIds)
+}
+
+function getTaskTitleTags(taskOrTitle) {
+  const title =
+    typeof taskOrTitle === 'string' ? taskOrTitle : taskOrTitle?.title || ''
+  const match = title.match(/^(\s*\[[^\]]+\]\s*)+/)
+
+  return match ? match[0].trim().match(/\[[^\]]+\]/g) || [] : []
+}
+
+function prefixTitleWithTag(title, tag) {
+  const trimmedTitle = String(title || '').trim()
+
+  if (!tag || trimmedTitle.includes(tag)) {
+    return trimmedTitle
+  }
+
+  return `${tag} ${trimmedTitle}`.trim()
+}
+
+function addUniqueId(ids, id) {
+  return id && !ids.includes(id) ? [...ids, id] : ids
+}
+
 function normalizeTasks(rawTasks, currentTime = Date.now()) {
   if (!Array.isArray(rawTasks)) {
     return []
@@ -318,6 +397,8 @@ function normalizeTasks(rawTasks, currentTime = Date.now()) {
       dependencies: Array.isArray(safeTask.dependencies)
         ? [...new Set(safeTask.dependencies.filter(Boolean).map(String))]
         : [],
+      labelIds: getTaskLabelIds(safeTask),
+      chainTaskIds: getTaskChainIds(safeTask),
       parallelGroupId:
         typeof safeTask.parallelGroupId === 'string' &&
         safeTask.parallelGroupId.trim()
@@ -346,6 +427,9 @@ function normalizeTasks(rawTasks, currentTime = Date.now()) {
     ...task,
     dependencies: task.dependencies.filter(
       (dependencyId) => dependencyId !== task.id && knownIds.has(dependencyId),
+    ),
+    chainTaskIds: getTaskChainIds(task).filter(
+      (chainTaskId) => chainTaskId !== task.id && knownIds.has(chainTaskId),
     ),
     parallelGroupId:
       task.parallelGroupId && groupCounts.get(task.parallelGroupId) > 1
@@ -397,6 +481,62 @@ function readStorageMode() {
 
 function writeStorageMode(storageMode) {
   localStorage.setItem(STORAGE_MODE_KEY, storageMode)
+}
+
+function readLabelBehaviors() {
+  try {
+    const savedBehaviors = localStorage.getItem(LABEL_BEHAVIORS_STORAGE_KEY)
+    const parsedBehaviors = savedBehaviors ? JSON.parse(savedBehaviors) : {}
+
+    return TASK_LABELS.reduce(
+      (behaviors, label) => ({
+        ...behaviors,
+        [label.id]: LABEL_BEHAVIORS.some(
+          (behavior) => behavior.id === parsedBehaviors[label.id],
+        )
+          ? parsedBehaviors[label.id]
+          : DEFAULT_LABEL_BEHAVIORS[label.id],
+      }),
+      {},
+    )
+  } catch {
+    return DEFAULT_LABEL_BEHAVIORS
+  }
+}
+
+function writeLabelBehaviors(labelBehaviors) {
+  localStorage.setItem(
+    LABEL_BEHAVIORS_STORAGE_KEY,
+    JSON.stringify(labelBehaviors),
+  )
+}
+
+async function loadSupabaseLabelBehaviors(userId) {
+  const { data, error } = await supabase
+    .from('label_settings')
+    .select('behaviors')
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (error) {
+    throw error
+  }
+
+  return data?.behaviors || null
+}
+
+async function saveSupabaseLabelBehaviors(userId, labelBehaviors) {
+  const { error } = await supabase
+    .from('label_settings')
+    .upsert({
+      user_id: userId,
+      behaviors: labelBehaviors,
+      updated_at: Date.now(),
+    })
+
+  if (error) {
+    throw error
+  }
 }
 
 function readInstanceLock() {
@@ -559,6 +699,8 @@ function taskToSupabaseRow(task, userId) {
     title: task.title,
     description: task.description,
     dependencies: getTaskDependencies(task),
+    label_ids: getTaskLabelIds(task),
+    chain_task_ids: getTaskChainIds(task),
     parallel_group_id: task.parallelGroupId,
     priority: getTaskPriority(task).id,
     completed: task.completed,
@@ -576,6 +718,8 @@ function taskToSupabaseExistingUpdateRow(task) {
     title: task.title,
     description: task.description,
     dependencies: getTaskDependencies(task),
+    label_ids: getTaskLabelIds(task),
+    chain_task_ids: getTaskChainIds(task),
     parallel_group_id: task.parallelGroupId,
     priority: getTaskPriority(task).id,
     created_at: task.createdAt,
@@ -590,6 +734,8 @@ function getComparableSupabaseTask(task) {
     title: task.title,
     description: task.description,
     dependencies: getTaskDependencies(task),
+    labelIds: getTaskLabelIds(task),
+    chainTaskIds: getTaskChainIds(task),
     parallelGroupId: task.parallelGroupId || null,
     priority: getTaskPriority(task).id,
     completed: Boolean(task.completed),
@@ -631,6 +777,8 @@ function supabaseRowToTask(row) {
     title: row.title,
     description: row.description,
     dependencies: row.dependencies,
+    labelIds: row.label_ids,
+    chainTaskIds: row.chain_task_ids,
     parallelGroupId: row.parallel_group_id,
     priority: row.priority,
     completed: row.completed,
@@ -646,7 +794,7 @@ async function loadSupabaseTasks(userId) {
   const { data, error } = await supabase
     .from('tasks')
     .select(
-      'id,title,description,dependencies,parallel_group_id,priority,completed,completed_at,created_at,hold_until,deleted,deleted_at',
+      'id,title,description,dependencies,label_ids,chain_task_ids,parallel_group_id,priority,completed,completed_at,created_at,hold_until,deleted,deleted_at',
     )
     .eq('user_id', userId)
     .eq('deleted', false)
@@ -969,6 +1117,11 @@ function App() {
   const [migrationDialogOpen, setMigrationDialogOpen] = useState(false)
   const [instanceStatus, setInstanceStatus] = useState('checking')
   const [taskText, setTaskText] = useState('')
+  const [newTaskLabelIds, setNewTaskLabelIds] = useState([])
+  const [searchLabelIds, setSearchLabelIds] = useState([])
+  const [labelBehaviors, setLabelBehaviors] = useState(readLabelBehaviors)
+  const [labelMenuPosition, setLabelMenuPosition] = useState(null)
+  const [labelMenuLabelId, setLabelMenuLabelId] = useState(null)
   const [now, setNow] = useState(() => Date.now())
   const [holdEditor, setHoldEditor] = useState(null)
   const [detailEditor, setDetailEditor] = useState(null)
@@ -1045,7 +1198,19 @@ function App() {
       const title = detailEditor?.title?.trim() || pendingDetailTask.title
       const relationships = detailEditor?.relationships || []
 
+      if (
+        pendingDetailTask.skipIfTitleUnchanged &&
+        title === (pendingDetailTask.initialTitle || '').trim()
+      ) {
+        setPendingDetailTask(null)
+        setDetailEditor(null)
+        return
+      }
+
       setTasks((currentTasks) => {
+        const chainTaskIds = relationships
+          .filter((relation) => relation.type === 'chain')
+          .map((relation) => relation.taskId)
         const parallelTask = relationships
           .filter((relation) => relation.type === 'parallel')
           .map((relation) => currentTasks.find((task) => task.id === relation.taskId))
@@ -1058,6 +1223,7 @@ function App() {
           dependencies: relationships
             .filter((relation) => relation.type === 'depends-on')
             .map((relation) => relation.taskId),
+          chainTaskIds,
           parallelGroupId: parallelTask
             ? getTaskParallelGroupId(parallelTask) || `parallel-${getStableTaskId()}`
             : null,
@@ -1073,8 +1239,16 @@ function App() {
                   : task,
               )
             : currentTasks
+        const tasksWithChainLinks = tasksWithParallelGroup.map((task) =>
+          chainTaskIds.includes(task.id)
+            ? {
+                ...task,
+                chainTaskIds: addUniqueId(getTaskChainIds(task), taskToCreate.id),
+              }
+            : task,
+        )
 
-        return normalizeParallelGroups([taskToCreate, ...tasksWithParallelGroup])
+        return normalizeParallelGroups([taskToCreate, ...tasksWithChainLinks])
       })
       setPendingDetailTask(null)
     }
@@ -1795,6 +1969,69 @@ function App() {
       return
     }
 
+    writeLabelBehaviors(labelBehaviors)
+
+    if (storageMode === 'online' && supabase && sessionUserId) {
+      saveSupabaseLabelBehaviors(sessionUserId, labelBehaviors).catch((error) => {
+        setSyncStatus('error')
+        setSyncMessage(error.message || 'Не удалось сохранить настройки ярлыков')
+      })
+    }
+  }, [instanceActive, labelBehaviors, sessionUserId, storageMode])
+
+  useEffect(() => {
+    if (!instanceActive || storageMode !== 'online' || !supabase || !sessionUserId) {
+      return
+    }
+
+    let cancelled = false
+
+    loadSupabaseLabelBehaviors(sessionUserId)
+      .then((onlineBehaviors) => {
+        if (!cancelled && onlineBehaviors) {
+          setLabelBehaviors({
+            ...DEFAULT_LABEL_BEHAVIORS,
+            ...onlineBehaviors,
+          })
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setSyncStatus('error')
+          setSyncMessage(error.message || 'Не удалось загрузить настройки ярлыков')
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [instanceActive, sessionUserId, storageMode])
+
+  useEffect(() => {
+    if (!instanceActive || !labelMenuPosition) {
+      return undefined
+    }
+
+    function closeOnOutsideClick(event) {
+      if (!event.target.closest('.label-menu')) {
+        closeLabelMenu()
+      }
+    }
+
+    document.addEventListener('mousedown', closeOnOutsideClick)
+    window.addEventListener('resize', closeLabelMenu)
+
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick)
+      window.removeEventListener('resize', closeLabelMenu)
+    }
+  }, [instanceActive, labelMenuPosition])
+
+  useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     writeStorageMode(storageMode)
 
     if (storageMode === 'local') {
@@ -1994,6 +2231,13 @@ function App() {
     const normalizedSearchQuery = normalizeSearchText(searchQuery)
 
     function taskMatchesSearch(task) {
+      if (
+        searchLabelIds.length > 0 &&
+        !searchLabelIds.every((labelId) => getTaskLabelIds(task).includes(labelId))
+      ) {
+        return false
+      }
+
       if (!normalizedSearchQuery) {
         return true
       }
@@ -2098,7 +2342,7 @@ function App() {
     const newTasks = sortedTasks.filter((task) => !frozenTaskOrder.includes(task.id))
 
     return [...frozenTasks, ...newTasks]
-  }, [tasks, showClosedTasks, taskById, frozenTaskOrder, searchQuery])
+  }, [tasks, showClosedTasks, taskById, frozenTaskOrder, searchQuery, searchLabelIds])
 
   const completedCount = useMemo(
     () => tasks.filter((task) => task.completed).length,
@@ -2136,6 +2380,133 @@ function App() {
       ...currentLevels,
       [level]: !currentLevels[level],
     }))
+  }
+
+  function getPalettePayload(event) {
+    try {
+      const payload = event.dataTransfer.getData('application/x-task-palette')
+
+      return payload ? JSON.parse(payload) : null
+    } catch {
+      return null
+    }
+  }
+
+  function handlePaletteDragStart(event, payload) {
+    event.dataTransfer.effectAllowed = 'copy'
+    event.dataTransfer.setData('application/x-task-palette', JSON.stringify(payload))
+    event.dataTransfer.setData(
+      'text/plain',
+      payload.type === 'tag' ? payload.value : payload.id,
+    )
+  }
+
+  function handlePaletteDragOver(event) {
+    const payload = getPalettePayload(event)
+
+    if (payload) {
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'copy'
+    }
+  }
+
+  function addTagToTaskInput(tag) {
+    setTaskText((currentText) => prefixTitleWithTag(currentText, tag))
+  }
+
+  function addLabelToNewTask(labelId) {
+    setNewTaskLabelIds((currentIds) => addUniqueId(currentIds, labelId))
+  }
+
+  function addTagToSearch(tag) {
+    setSearchQuery((currentQuery) => prefixTitleWithTag(currentQuery, tag))
+  }
+
+  function addLabelToSearch(labelId) {
+    setSearchLabelIds((currentIds) => addUniqueId(currentIds, labelId))
+  }
+
+  function handleTaskInputDrop(event) {
+    const payload = getPalettePayload(event)
+
+    if (!payload) {
+      return
+    }
+
+    event.preventDefault()
+
+    if (payload.type === 'tag') {
+      addTagToTaskInput(payload.value)
+    }
+
+    if (payload.type === 'label') {
+      addLabelToNewTask(payload.id)
+    }
+  }
+
+  function handleSearchDrop(event) {
+    const payload = getPalettePayload(event)
+
+    if (!payload) {
+      return
+    }
+
+    event.preventDefault()
+
+    if (payload.type === 'tag') {
+      addTagToSearch(payload.value)
+    }
+
+    if (payload.type === 'label') {
+      addLabelToSearch(payload.id)
+    }
+  }
+
+  function addPayloadToTask(taskId, payload) {
+    if (payload.type === 'tag') {
+      setTasks((currentTasks) =>
+        currentTasks.map((task) =>
+          task.id === taskId && !task.completed
+            ? { ...task, title: prefixTitleWithTag(task.title, payload.value) }
+            : task,
+        ),
+      )
+    }
+
+    if (payload.type === 'label') {
+      setTasks((currentTasks) =>
+        currentTasks.map((task) =>
+          task.id === taskId && !task.completed
+            ? {
+                ...task,
+                labelIds: addUniqueId(getTaskLabelIds(task), payload.id),
+              }
+            : task,
+        ),
+      )
+    }
+  }
+
+  function openLabelMenu(event, labelId) {
+    event.preventDefault()
+    setLabelMenuLabelId(labelId)
+    setLabelMenuPosition({
+      left: Math.min(event.clientX, window.innerWidth - 190),
+      top: Math.min(event.clientY, window.innerHeight - 96),
+    })
+  }
+
+  function closeLabelMenu() {
+    setLabelMenuLabelId(null)
+    setLabelMenuPosition(null)
+  }
+
+  function updateLabelBehavior(labelId, behaviorId) {
+    setLabelBehaviors((currentBehaviors) => ({
+      ...currentBehaviors,
+      [labelId]: behaviorId,
+    }))
+    closeLabelMenu()
   }
 
   function switchStorageMode(nextStorageMode) {
@@ -2292,6 +2663,8 @@ function App() {
       title,
       description: '',
       dependencies: [],
+      labelIds: newTaskLabelIds,
+      chainTaskIds: [],
       parallelGroupId: null,
       priority: creationCommand.priority,
       completed: false,
@@ -2312,11 +2685,13 @@ function App() {
         selectedRelationType: 'depends-on',
         selectedLinkedTaskId: '',
       })
+      setNewTaskLabelIds([])
       setTaskText('')
       return
     }
 
     setTasks((currentTasks) => [nextTask, ...currentTasks])
+    setNewTaskLabelIds([])
     setTaskText('')
   }
 
@@ -2330,6 +2705,15 @@ function App() {
         : [taskId],
     )
     const nextCompletedAt = Date.now()
+    const chainSourceTask =
+      targetTask &&
+      !targetTask.completed &&
+      getTaskLabelIds(targetTask).some(
+        (labelId) => labelBehaviors[labelId] === 'chain',
+      )
+        ? targetTask
+        : null
+    const chainTaskId = chainSourceTask ? getStableTaskId() : null
     const nextTasksForOnlineSave = normalizeParallelGroups(
       tasks.map((task) => {
         if (!affectedTaskIdsForOnlineSave.has(task.id)) {
@@ -2352,6 +2736,38 @@ function App() {
     onlineSaveImmediatelyRef.current = false
     onlineLatestTasksRef.current = nextTasksForOnlineSave
     setTasks(nextTasksForOnlineSave)
+
+    if (chainSourceTask && chainTaskId) {
+      const sourceTags = getTaskTitleTags(chainSourceTask)
+      const initialTitle = sourceTags.join(' ')
+
+      setPendingDetailTask({
+        id: chainTaskId,
+        title: initialTitle,
+        initialTitle,
+        description: '',
+        dependencies: [],
+        labelIds: getTaskLabelIds(chainSourceTask),
+        chainTaskIds: [chainSourceTask.id],
+        parallelGroupId: null,
+        priority: getTaskPriority(chainSourceTask).id,
+        completed: false,
+        completedAt: null,
+        createdAt: Date.now(),
+        holdUntil: null,
+        skipIfTitleUnchanged: true,
+      })
+      setDetailEditor({
+        taskId: chainTaskId,
+        title: initialTitle,
+        priority: getTaskPriority(chainSourceTask).id,
+        description: '',
+        readonly: false,
+        relationships: [{ type: 'chain', taskId: chainSourceTask.id }],
+        selectedRelationType: 'depends-on',
+        selectedLinkedTaskId: '',
+      })
+    }
 
     if (
       storageMode === 'online' &&
@@ -2500,6 +2916,11 @@ function App() {
           .filter((relation) => relation.type === 'parallel')
           .map((relation) => relation.taskId),
       )
+      const selectedChainTaskIds = new Set(
+        nextRelationships
+          .filter((relation) => relation.type === 'chain')
+          .map((relation) => relation.taskId),
+      )
       const editedTask = currentTasks.find(
         (task) => task.id === detailEditor.taskId,
       )
@@ -2527,6 +2948,7 @@ function App() {
             dependencies: nextRelationships
               .filter((relation) => relation.type === 'depends-on')
               .map((relation) => relation.taskId),
+            chainTaskIds: [...selectedChainTaskIds],
             parallelGroupId: nextParallelGroupId,
           }
         }
@@ -2544,6 +2966,9 @@ function App() {
         const taskDependencies = getTaskDependencies(task).filter(
           (dependencyId) => dependencyId !== detailEditor.taskId,
         )
+        const taskChainIds = getTaskChainIds(task).filter(
+          (chainTaskId) => chainTaskId !== detailEditor.taskId,
+        )
         const isBlockedByEditedTask = nextRelationships.some(
           (relation) =>
             relation.type === 'blocks' && relation.taskId === task.id,
@@ -2554,6 +2979,9 @@ function App() {
           dependencies: isBlockedByEditedTask
             ? [...taskDependencies, detailEditor.taskId]
             : taskDependencies,
+          chainTaskIds: selectedChainTaskIds.has(task.id)
+            ? [...taskChainIds, detailEditor.taskId]
+            : taskChainIds,
           parallelGroupId:
             selectedParallelTaskIds.has(task.id) || belongsToSelectedParallelGroup
               ? nextParallelGroupId
@@ -2621,6 +3049,9 @@ function App() {
           ...task,
           dependencies: getTaskDependencies(task).filter(
             (dependencyId) => dependencyId !== taskId,
+          ),
+          chainTaskIds: getTaskChainIds(task).filter(
+            (chainTaskId) => chainTaskId !== taskId,
           ),
           })),
       ),
@@ -2975,6 +3406,12 @@ function App() {
   }
 
   function handlePomodoroDragOver(event, task) {
+    if (getPalettePayload(event) && !task.completed) {
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'copy'
+      return
+    }
+
     if (!pomodoro.enabled || task.completed) {
       return
     }
@@ -2984,6 +3421,14 @@ function App() {
   }
 
   function handlePomodoroDrop(event, task) {
+    const payload = getPalettePayload(event)
+
+    if (payload && !task.completed) {
+      event.preventDefault()
+      addPayloadToTask(task.id, payload)
+      return
+    }
+
     if (!pomodoro.enabled || task.completed) {
       return
     }
@@ -3038,6 +3483,10 @@ function App() {
             type: 'parallel',
             taskId: relatedTask.id,
           })),
+        ...getTaskChainIds(task).map((taskId) => ({
+          type: 'chain',
+          taskId,
+        })),
       ],
       selectedRelationType: 'depends-on',
       selectedLinkedTaskId: '',
@@ -3146,14 +3595,78 @@ function App() {
     <main className="app">
       <section className="task-panel" aria-labelledby="task-manager-title">
         <header className="task-header">
-          <div>
+          <div className="quick-palette" aria-label="Быстрые теги и ярлыки">
+            <div className="quick-tags">
+              {QUICK_TAGS.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  draggable
+                  onClick={() => addTagToTaskInput(tag)}
+                  onDragStart={(event) =>
+                    handlePaletteDragStart(event, { type: 'tag', value: tag })
+                  }
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+            <div className="quick-labels">
+              {TASK_LABELS.map((label) => (
+                <button
+                  className="task-label-button"
+                  key={label.id}
+                  type="button"
+                  draggable
+                  onClick={() => addLabelToNewTask(label.id)}
+                  onContextMenu={(event) => openLabelMenu(event, label.id)}
+                  onDragStart={(event) =>
+                    handlePaletteDragStart(event, {
+                      type: 'label',
+                      id: label.id,
+                    })
+                  }
+                  title={`${label.name}: ${getLabelBehaviorLabel(labelBehaviors[label.id])}`}
+                >
+                  <img src={label.image} alt="" />
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="task-title-block">
             <p className="eyebrow">Task Manager</p>
             <h1 id="task-manager-title">Мои задачи</h1>
           </div>
-          <div className="task-search">
+          <div
+            className="task-search"
+            onDragOver={handlePaletteDragOver}
+            onDrop={handleSearchDrop}
+          >
             <label className="sr-only" htmlFor="task-search-input">
               Поиск задач
             </label>
+            {searchLabelIds.length > 0 ? (
+              <div className="inline-labels">
+                {searchLabelIds.map((labelId) => {
+                  const label = TASK_LABELS.find((item) => item.id === labelId)
+
+                  return label ? (
+                    <button
+                      key={label.id}
+                      type="button"
+                      onClick={() =>
+                        setSearchLabelIds((currentIds) =>
+                          currentIds.filter((id) => id !== label.id),
+                        )
+                      }
+                      title="Убрать ярлык из поиска"
+                    >
+                      <img src={label.image} alt="" />
+                    </button>
+                  ) : null
+                })}
+              </div>
+            ) : null}
             <input
               id="task-search-input"
               type="search"
@@ -3311,7 +3824,12 @@ function App() {
           ) : null}
         </section>
 
-        <form className="task-form" onSubmit={addTask}>
+        <form
+          className="task-form"
+          onSubmit={addTask}
+          onDragOver={handlePaletteDragOver}
+          onDrop={handleTaskInputDrop}
+        >
           <label className="sr-only" htmlFor="task-input">
             Новая задача
           </label>
@@ -3323,6 +3841,28 @@ function App() {
             placeholder="Например: подготовить отчет"
             autoComplete="off"
           />
+          {newTaskLabelIds.length > 0 ? (
+            <div className="new-task-labels">
+              {newTaskLabelIds.map((labelId) => {
+                const label = TASK_LABELS.find((item) => item.id === labelId)
+
+                return label ? (
+                  <button
+                    key={label.id}
+                    type="button"
+                    onClick={() =>
+                      setNewTaskLabelIds((currentIds) =>
+                        currentIds.filter((id) => id !== label.id),
+                      )
+                    }
+                    title="Убрать ярлык из новой задачи"
+                  >
+                    <img src={label.image} alt="" />
+                  </button>
+                ) : null
+              })}
+            </div>
+          ) : null}
           <button type="submit">Добавить</button>
         </form>
 
@@ -3424,6 +3964,17 @@ function App() {
                     />
                     <span>{task.title}</span>
                   </div>
+                  {getTaskLabelIds(task).length > 0 ? (
+                    <div className="task-labels">
+                      {getTaskLabelIds(task).map((labelId) => {
+                        const label = TASK_LABELS.find((item) => item.id === labelId)
+
+                        return label ? (
+                          <img key={label.id} src={label.image} alt={label.name} />
+                        ) : null
+                      })}
+                    </div>
+                  ) : null}
                   {dependencyReason ? (
                     <span
                       className="dependency-reason"
@@ -3508,7 +4059,7 @@ function App() {
           </ul>
         ) : (
           <p className="empty-state">
-            {searchQuery.trim()
+            {searchQuery.trim() || searchLabelIds.length > 0
               ? 'Ничего не найдено.'
               : storageMode === 'online' &&
                   (syncStatus === 'loading' || syncStatus === 'signed-out')
@@ -3549,6 +4100,39 @@ function App() {
                     <PriorityIcon icon={priorityOption.icon} />
                   </span>
                   <span>{priorityOption.label}</span>
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {labelMenuLabelId && labelMenuPosition && typeof document !== 'undefined'
+        ? createPortal(
+            <div
+              className="label-menu"
+              role="menu"
+              style={{
+                left: `${labelMenuPosition.left}px`,
+                top: `${labelMenuPosition.top}px`,
+              }}
+            >
+              {LABEL_BEHAVIORS.map((behavior) => (
+                <button
+                  className={
+                    labelBehaviors[labelMenuLabelId] === behavior.id
+                      ? 'selected'
+                      : ''
+                  }
+                  key={behavior.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={labelBehaviors[labelMenuLabelId] === behavior.id}
+                  onClick={() =>
+                    updateLabelBehavior(labelMenuLabelId, behavior.id)
+                  }
+                >
+                  {behavior.label}
                 </button>
               ))}
             </div>,
