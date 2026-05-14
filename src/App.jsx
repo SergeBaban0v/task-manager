@@ -16,6 +16,7 @@ const STORAGE_KEY = 'task-manager.tasks'
 const STORAGE_MODE_KEY = 'task-manager.storage-mode'
 const POMODORO_STORAGE_KEY = 'task-manager.pomodoro'
 const LABEL_BEHAVIORS_STORAGE_KEY = 'task-manager.label-behaviors'
+const QUICK_TAGS_STORAGE_KEY = 'task-manager.quick-tags'
 const INSTANCE_LOCK_KEY = 'task-manager.instance-lock'
 const INSTANCE_CHANNEL_NAME = 'task-manager-instance'
 const STORAGE_VERSION = 2
@@ -88,6 +89,7 @@ const DEFAULT_LABEL_BEHAVIORS = TASK_LABELS.reduce(
   }),
   {},
 )
+const QUICK_TAG_EDIT_DELAY_MS = 550
 const TASK_PRIORITY_CODE_MAP = {
   1: 'low',
   2: 'medium',
@@ -502,6 +504,25 @@ function readLabelBehaviors() {
   } catch {
     return DEFAULT_LABEL_BEHAVIORS
   }
+}
+
+function readQuickTags() {
+  try {
+    const savedTags = localStorage.getItem(QUICK_TAGS_STORAGE_KEY)
+    const parsedTags = savedTags ? JSON.parse(savedTags) : null
+
+    return Array.isArray(parsedTags) && parsedTags.length > 0
+      ? parsedTags
+          .filter((tag) => typeof tag === 'string' && tag.trim())
+          .map((tag) => tag.trim())
+      : QUICK_TAGS
+  } catch {
+    return QUICK_TAGS
+  }
+}
+
+function writeQuickTags(tags) {
+  localStorage.setItem(QUICK_TAGS_STORAGE_KEY, JSON.stringify(tags))
 }
 
 function writeLabelBehaviors(labelBehaviors) {
@@ -1122,6 +1143,9 @@ function App() {
   const [labelBehaviors, setLabelBehaviors] = useState(readLabelBehaviors)
   const [labelMenuPosition, setLabelMenuPosition] = useState(null)
   const [labelMenuLabelId, setLabelMenuLabelId] = useState(null)
+  const [quickTags, setQuickTags] = useState(readQuickTags)
+  const [editingQuickTagIndex, setEditingQuickTagIndex] = useState(null)
+  const quickTagHoldTimerRef = useRef(null)
   const [now, setNow] = useState(() => Date.now())
   const [holdEditor, setHoldEditor] = useState(null)
   const [detailEditor, setDetailEditor] = useState(null)
@@ -1969,6 +1993,14 @@ function App() {
       return
     }
 
+    return () => clearQuickTagEditTimer()
+  }, [instanceActive])
+
+  useEffect(() => {
+    if (!instanceActive) {
+      return
+    }
+
     writeLabelBehaviors(labelBehaviors)
 
     if (storageMode === 'online' && supabase && sessionUserId) {
@@ -2507,6 +2539,60 @@ function App() {
       [labelId]: behaviorId,
     }))
     closeLabelMenu()
+  }
+
+  function startQuickTagEditTimer(index) {
+    window.clearTimeout(quickTagHoldTimerRef.current)
+    quickTagHoldTimerRef.current = window.setTimeout(() => {
+      setEditingQuickTagIndex(index)
+    }, QUICK_TAG_EDIT_DELAY_MS)
+  }
+
+  function clearQuickTagEditTimer() {
+    window.clearTimeout(quickTagHoldTimerRef.current)
+    quickTagHoldTimerRef.current = null
+  }
+
+  function updateQuickTag(index, value) {
+    setQuickTags((currentTags) =>
+      currentTags.map((tag, currentIndex) =>
+        currentIndex === index ? value : tag,
+      ),
+    )
+  }
+
+  function finishQuickTagEdit(index) {
+    setQuickTags((currentTags) => {
+      const nextTags = currentTags.map((tag, currentIndex) => {
+        if (currentIndex !== index) {
+          return tag
+        }
+
+        const trimmedTag = tag.trim()
+
+        if (!trimmedTag) {
+          return QUICK_TAGS[index] || '[...]'
+        }
+
+        return trimmedTag.startsWith('[') && trimmedTag.endsWith(']')
+          ? trimmedTag
+          : `[${trimmedTag.replace(/^\[|\]$/g, '')}]`
+      })
+
+      writeQuickTags(nextTags)
+      return nextTags
+    })
+    setEditingQuickTagIndex(null)
+  }
+
+  function addQuickTag() {
+    setQuickTags((currentTags) => {
+      const nextTags = [...currentTags, '[...]']
+
+      writeQuickTags(nextTags)
+      return nextTags
+    })
+    setEditingQuickTagIndex(quickTags.length)
   }
 
   function switchStorageMode(nextStorageMode) {
@@ -3597,19 +3683,45 @@ function App() {
         <header className="task-header">
           <div className="quick-palette" aria-label="Быстрые теги и ярлыки">
             <div className="quick-tags">
-              {QUICK_TAGS.map((tag) => (
-                <button
-                  key={tag}
-                  type="button"
-                  draggable
-                  onClick={() => addTagToTaskInput(tag)}
-                  onDragStart={(event) =>
-                    handlePaletteDragStart(event, { type: 'tag', value: tag })
-                  }
-                >
-                  {tag}
-                </button>
-              ))}
+              {quickTags.map((tag, index) =>
+                editingQuickTagIndex === index ? (
+                  <input
+                    key={`edit-${index}`}
+                    type="text"
+                    value={tag}
+                    onBlur={() => finishQuickTagEdit(index)}
+                    onChange={(event) => updateQuickTag(index, event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === 'Escape') {
+                        event.currentTarget.blur()
+                      }
+                    }}
+                    autoFocus
+                  />
+                ) : (
+                  <button
+                    key={`${tag}-${index}`}
+                    type="button"
+                    draggable
+                    onClick={() => addTagToTaskInput(tag)}
+                    onMouseDown={(event) => {
+                      if (event.button === 0) {
+                        startQuickTagEditTimer(index)
+                      }
+                    }}
+                    onMouseLeave={clearQuickTagEditTimer}
+                    onMouseUp={clearQuickTagEditTimer}
+                    onDragStart={(event) =>
+                      handlePaletteDragStart(event, { type: 'tag', value: tag })
+                    }
+                  >
+                    {tag}
+                  </button>
+                ),
+              )}
+              <button type="button" onClick={addQuickTag}>
+                [...]
+              </button>
             </div>
             <div className="quick-labels">
               {TASK_LABELS.map((label) => (
@@ -4132,6 +4244,9 @@ function App() {
                     updateLabelBehavior(labelMenuLabelId, behavior.id)
                   }
                 >
+                  <span aria-hidden="true">
+                    {labelBehaviors[labelMenuLabelId] === behavior.id ? '✓' : ''}
+                  </span>
                   {behavior.label}
                 </button>
               ))}
@@ -4476,15 +4591,28 @@ function App() {
             </select>
 
             <label htmlFor="detail-description">Описание</label>
-            <textarea
-              id="detail-description"
-              value={detailEditor.description}
-              onChange={(event) =>
-                updateDetailTaskField('description', event.target.value)
-              }
-              readOnly={detailEditor.readonly}
-              rows={5}
-            />
+            {detailEditor.readonly ? (
+              <div className="detail-description-links">
+                {detailEditor.description.split(/(https?:\/\/[^\s]+)/g).map((part, index) =>
+                  /^https?:\/\//.test(part) ? (
+                    <a key={`${part}-${index}`} href={part} target="_blank" rel="noreferrer">
+                      {part}
+                    </a>
+                  ) : (
+                    <span key={`${part}-${index}`}>{part}</span>
+                  ),
+                )}
+              </div>
+            ) : (
+              <textarea
+                id="detail-description"
+                value={detailEditor.description}
+                onChange={(event) =>
+                  updateDetailTaskField('description', event.target.value)
+                }
+                rows={5}
+              />
+            )}
 
             <section className="relationship-section">
               <h3>Связи</h3>
