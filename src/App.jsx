@@ -2498,7 +2498,7 @@ function App() {
     if (payload.type === 'tag') {
       setTasks((currentTasks) =>
         currentTasks.map((task) =>
-          task.id === taskId && !task.completed
+          task.id === taskId
             ? { ...task, title: prefixTitleWithTag(task.title, payload.value) }
             : task,
         ),
@@ -2508,7 +2508,7 @@ function App() {
     if (payload.type === 'label') {
       setTasks((currentTasks) =>
         currentTasks.map((task) =>
-          task.id === taskId && !task.completed
+          task.id === taskId
             ? {
                 ...task,
                 labelIds: addUniqueId(getTaskLabelIds(task), payload.id),
@@ -2587,7 +2587,7 @@ function App() {
 
   function addQuickTag() {
     setQuickTags((currentTags) => {
-      const nextTags = [...currentTags, '[...]']
+      const nextTags = [...currentTags, '']
 
       writeQuickTags(nextTags)
       return nextTags
@@ -3492,7 +3492,7 @@ function App() {
   }
 
   function handlePomodoroDragOver(event, task) {
-    if (getPalettePayload(event) && !task.completed) {
+    if (getPalettePayload(event)) {
       event.preventDefault()
       event.dataTransfer.dropEffect = 'copy'
       return
@@ -3509,7 +3509,7 @@ function App() {
   function handlePomodoroDrop(event, task) {
     const payload = getPalettePayload(event)
 
-    if (payload && !task.completed) {
+    if (payload) {
       event.preventDefault()
       addPayloadToTask(task.id, payload)
       return
